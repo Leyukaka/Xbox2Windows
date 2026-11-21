@@ -535,6 +535,9 @@ if(EXISTS "${INTAKE_PYTHON}")
         "${CMAKE_SOURCE_DIR}/tests/cpu/native_delay_check.py" "$<TARGET_FILE:pe_map>"
         "$<TARGET_FILE:cpu_delay_route>" "$<TARGET_FILE:cpu_delay_provider>"
         "$<TARGET_FILE:cpu_delay_provider_altered>")
+    add_test(NAME cpu_native_lifetime COMMAND "${INTAKE_PYTHON}" -B
+        "${CMAKE_SOURCE_DIR}/tests/cpu/native_lifetime_check.py" "$<TARGET_FILE:pe_map>"
+        "$<TARGET_FILE:cpu_tls_original>" "$<TARGET_FILE:cpu_tls_sink>")
     add_library(script_path_host SHARED tools/script_path_host.cpp)
     target_compile_features(script_path_host PRIVATE cxx_std_17)
     add_test(NAME script_path_links COMMAND "${INTAKE_PYTHON}" -B

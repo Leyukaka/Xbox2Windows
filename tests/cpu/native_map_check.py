@@ -37,6 +37,7 @@ class Mapper:
         self.export.restype = ctypes.c_void_p
         self.release = lib.pe_map_release
         self.release.argtypes = [ctypes.c_void_p]
+        self.release.restype = ctypes.c_int  # 1 released, 0 unknown or already released
 
     def __call__(self, image, bindings):
         """Map image; bindings maps a lower-case DLL name to the module that serves its imports."""

@@ -181,7 +181,108 @@ bool read_file(const wchar_t* path, std::vector<std::uint8_t>& raw) {
     return ok;
 }
 
+// Images attached by pe_map_image. pe_map.dll is itself loaded by Windows, so its DllMain receives
+// DLL_THREAD_ATTACH/DETACH and forwards them to these images: attach in mapping order, detach in
+// reverse mapping order, as measured with two LoadLibraryW copies on Windows 11 build 26300.
+//
+// Lifetime protocol: each image holds one reference for its registration and one per thread
+// notification in flight. DllMain takes those references under mapped_lock and calls the guest
+// callbacks after releasing it, so a callback may map or release any image, its own included.
+// pe_map_release unregisters the image and drops the registration reference without waiting. The
+// image's process detach and unmapping run when the last reference goes, either inside
+// pe_map_release or on the thread that finishes the last notification. No notification that starts
+// after the release reaches the image, even from a notifier that took its reference before it. A
+// notification already in progress finishes: when a TLS callback releases its own image, that
+// image's entry point still receives the same thread attach.
+SRWLOCK mapped_lock = SRWLOCK_INIT;
+
+struct Mapped {
+    std::uint8_t* base;
+    volatile LONG references;
+    volatile LONG released;  // set by pe_map_release; notifiers skip the image from then on
+};
+
+struct SharedLock {
+    SharedLock() { AcquireSRWLockShared(&mapped_lock); }
+    ~SharedLock() { ReleaseSRWLockShared(&mapped_lock); }
+    SharedLock(const SharedLock&) = delete;
+    SharedLock& operator=(const SharedLock&) = delete;
+};
+
+struct ExclusiveLock {
+    ExclusiveLock() { AcquireSRWLockExclusive(&mapped_lock); }
+    ~ExclusiveLock() { ReleaseSRWLockExclusive(&mapped_lock); }
+    ExclusiveLock(const ExclusiveLock&) = delete;
+    ExclusiveLock& operator=(const ExclusiveLock&) = delete;
+};
+
+std::vector<Mapped*>& mapped_images() {
+    static std::vector<Mapped*> images;
+    return images;
+}
+
+// Notify a mapped image, re-reading its callback list as Windows does; if the list was
+// overwritten or made unreadable, the entry point is still notified.
+void notify_mapped(std::uint8_t* base, DWORD reason) {
+    const auto* nt = Image{base, 0}.headers();
+    const Image image{base, nt->OptionalHeader.SizeOfImage};
+    std::vector<PIMAGE_TLS_CALLBACK> callbacks;
+    try {
+        if (tls_callbacks(image, nt, callbacks)) callbacks.clear();
+    } catch (const std::bad_alloc&) {
+        // Never let an allocation failure escape DllMain or pe_map_release; the entry point is
+        // still notified.
+        callbacks.clear();
+    }
+    notify(image, nt, callbacks, reason);
+}
+
+// Process detach, function-table removal and unmapping, once no reference remains.
+void finalize(std::uint8_t* base) {
+    const auto* nt = Image{base, 0}.headers();
+    notify_mapped(base, DLL_PROCESS_DETACH);
+    const auto& pdata = directory(nt, IMAGE_DIRECTORY_ENTRY_EXCEPTION);
+    if (pdata.Size) RtlDeleteFunctionTable(reinterpret_cast<PRUNTIME_FUNCTION>(base + pdata.VirtualAddress));
+    VirtualFree(base, 0, MEM_RELEASE);
+}
+
+void drop_reference(Mapped* record) {
+    if (InterlockedDecrement(&record->references) != 0) return;
+    finalize(record->base);
+    delete record;
+}
+
 }  // namespace
+
+BOOL WINAPI DllMain(HINSTANCE, DWORD reason, LPVOID) {
+    if (reason == DLL_THREAD_ATTACH || reason == DLL_THREAD_DETACH) {
+        std::vector<Mapped*> snapshot;
+        {
+            const SharedLock hold;
+            try {
+                snapshot.reserve(mapped_images().size());
+            } catch (const std::bad_alloc&) {
+                return TRUE;  // no references were taken, so nothing is left pending
+            }
+            for (auto* record : mapped_images()) {
+                InterlockedIncrement(&record->references);
+                snapshot.push_back(record);
+            }
+        }
+        // Guest callbacks run without mapped_lock. An image released meanwhile is still mapped
+        // until its last reference is dropped here.
+        auto notify_one = [reason](Mapped* record) {
+            if (!InterlockedCompareExchange(&record->released, 0, 0)) notify_mapped(record->base, reason);
+            drop_reference(record);
+        };
+        if (reason == DLL_THREAD_ATTACH) {
+            for (auto it = snapshot.begin(); it != snapshot.end(); ++it) notify_one(*it);
+        } else {
+            for (auto it = snapshot.rbegin(); it != snapshot.rend(); ++it) notify_one(*it);
+        }
+    }
+    return TRUE;
+}
 
 extern "C" __declspec(dllexport) void* pe_map_image(const wchar_t* path, Resolver resolve,
                                                     std::uint32_t* status, char* detail,
@@ -454,6 +555,22 @@ extern "C" __declspec(dllexport) void* pe_map_image(const wchar_t* path, Resolve
         if (pdata.Size) RtlDeleteFunctionTable(image.at<RUNTIME_FUNCTION>(pdata.VirtualAddress));
         return release(fail(MAP_INIT_FAILED, "entry point returned FALSE"));
     }
+    Mapped* record = new (std::nothrow) Mapped{base, 1, 0};
+    bool registered = record != nullptr;
+    if (record) {
+        const ExclusiveLock hold;
+        try {
+            mapped_images().push_back(record);
+        } catch (const std::bad_alloc&) {
+            registered = false;
+        }
+    }
+    if (!registered) {
+        delete record;
+        notify(image, mapped_nt, callbacks, DLL_PROCESS_DETACH);
+        if (pdata.Size) RtlDeleteFunctionTable(image.at<RUNTIME_FUNCTION>(pdata.VirtualAddress));
+        return release(fail(MAP_MEMORY, "cannot register image for thread notifications"));
+    }
     return base;
 }
 
@@ -481,16 +598,24 @@ extern "C" __declspec(dllexport) void* pe_map_export(void* mapped, const char* n
     return nullptr;
 }
 
-extern "C" __declspec(dllexport) void pe_map_release(void* mapped) {
-    auto* base = static_cast<std::uint8_t*>(mapped);
-    const auto* nt = Image{base, 0}.headers();
-    const Image image{base, nt->OptionalHeader.SizeOfImage};
-    std::vector<PIMAGE_TLS_CALLBACK> callbacks;
-    // The list is re-read, as Windows does; if it was overwritten or made unreadable,
-    // the entry point is still notified.
-    if (tls_callbacks(image, nt, callbacks)) callbacks.clear();
-    notify(image, nt, callbacks, DLL_PROCESS_DETACH);
-    const auto& pdata = directory(nt, IMAGE_DIRECTORY_ENTRY_EXCEPTION);
-    if (pdata.Size) RtlDeleteFunctionTable(reinterpret_cast<PRUNTIME_FUNCTION>(base + pdata.VirtualAddress));
-    VirtualFree(base, 0, MEM_RELEASE);
+// Returns 1 after unregistering an image that pe_map_image returned, and 0 for null, for any
+// other pointer and for a second release. Process detach and unmapping follow the protocol above:
+// at once if no thread notification for the image is in flight, otherwise when the last one ends.
+extern "C" __declspec(dllexport) int pe_map_release(void* mapped) {
+    Mapped* record = nullptr;
+    {
+        const ExclusiveLock hold;
+        auto& images = mapped_images();
+        for (auto it = images.begin(); it != images.end(); ++it) {
+            if ((*it)->base == mapped) {
+                record = *it;
+                images.erase(it);
+                break;
+            }
+        }
+    }
+    if (!record) return 0;
+    InterlockedExchange(&record->released, 1);
+    drop_reference(record);
+    return 1;
 }

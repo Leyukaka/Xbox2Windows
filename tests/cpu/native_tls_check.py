@@ -20,7 +20,8 @@ ERROR_DLL_INIT_FAILED = 1114
 
 class Call(ctypes.Structure):
     _fields_ = [("caller", ctypes.c_uint32), ("reason", ctypes.c_uint32),
-                ("module", ctypes.c_uint64), ("reserved", ctypes.c_uint64)]
+                ("module", ctypes.c_uint64), ("reserved", ctypes.c_uint64),
+                ("thread", ctypes.c_uint32), ("padding", ctypes.c_uint32)]
 
 
 def load_sink(path):
@@ -43,8 +44,47 @@ def calls(sink, module=None):
     return [[c.caller, c.reason, "module" if c.module == module else hex(c.module), c.reserved] for c in recorded]
 
 
+THREAD_ATTACH, THREAD_DETACH = 2, 3
+
+
+def new_thread_calls(sink, module, before_resume=None):
+    """Start and join one thread; return the thread notifications recorded on that thread.
+
+    The thread is created suspended; before_resume(thread_id), if given, runs before it starts."""
+    kernel = ctypes.WinDLL("kernel32", use_last_error=True)
+    kernel.GetModuleHandleW.argtypes = [ctypes.c_wchar_p]
+    kernel.GetModuleHandleW.restype = ctypes.c_void_p
+    kernel.GetProcAddress.argtypes = [ctypes.c_void_p, ctypes.c_char_p]
+    kernel.GetProcAddress.restype = ctypes.c_void_p
+    kernel.CreateThread.argtypes = [ctypes.c_void_p, ctypes.c_size_t, ctypes.c_void_p, ctypes.c_void_p,
+                                    ctypes.c_uint32, ctypes.POINTER(ctypes.c_uint32)]
+    kernel.CreateThread.restype = ctypes.c_void_p
+    kernel.WaitForSingleObject.argtypes = [ctypes.c_void_p, ctypes.c_uint32]
+    kernel.CloseHandle.argtypes = [ctypes.c_void_p]
+    kernel.ResumeThread.argtypes = [ctypes.c_void_p]
+    kernel.ResumeThread.restype = ctypes.c_uint32
+    # Sleep(0) as the start routine: on x64 the parameter arrives in RCX (null, so Sleep(0)); Sleep returns
+    # no value, so the thread's exit code is undefined, and it is never read. The thread exits at once.
+    start = kernel.GetProcAddress(kernel.GetModuleHandleW("kernel32"), b"Sleep")
+    thread_id = ctypes.c_uint32()
+    sink.sink_clear()
+    handle = kernel.CreateThread(None, 0, start, None, 0x4, ctypes.byref(thread_id))  # CREATE_SUSPENDED
+    if not handle:
+        raise AssertionError("test thread could not be created")
+    if before_resume:
+        before_resume(thread_id.value)
+    kernel.ResumeThread(handle)
+    if kernel.WaitForSingleObject(handle, 10000) != 0:
+        raise AssertionError("test thread did not start or exit")
+    kernel.CloseHandle(handle)
+    buffer = (Call * 64)()
+    count = sink.sink_read(buffer, len(buffer))
+    return [[c.caller, c.reason, "module" if c.module == module else hex(c.module), c.reserved]
+            for c in buffer[:count] if c.thread == thread_id.value]
+
+
 def run(target, image, sink_path, mapper_path):
-    """Child process per target and image: load, observe attach, release, observe detach."""
+    """Child process per target and image: load, observe attach, one thread, release, observe detach."""
     sink = load_sink(sink_path)
     sink.sink_clear()
     if target == "native":
@@ -64,9 +104,10 @@ def run(target, image, sink_path, mapper_path):
         print(json.dumps({"failure": failure, "attach": calls(sink)}))
         return
     attach = calls(sink, module)
+    thread = new_thread_calls(sink, module)
     sink.sink_clear()
     release()
-    print(json.dumps({"failure": None, "attach": attach, "detach": calls(sink, module)}))
+    print(json.dumps({"failure": None, "attach": attach, "thread": thread, "detach": calls(sink, module)}))
 
 
 def child(target, image, sink, mapper):
@@ -80,7 +121,8 @@ def child(target, image, sink, mapper):
 def check(original, refuse, sink, mapper):
     process = lambda reason: [[TLS, reason, "module", 0], [ENTRY, reason, "module", 0]]
     expected = {
-        "original": {"failure": None, "attach": process(ATTACH), "detach": process(DETACH)},
+        "original": {"failure": None, "attach": process(ATTACH),
+                     "thread": process(THREAD_ATTACH) + process(THREAD_DETACH), "detach": process(DETACH)},
         "refuse": {"attach": process(ATTACH) + process(DETACH)},
     }
     for name, image in (("original", original), ("refuse", refuse)):
@@ -94,8 +136,9 @@ def check(original, refuse, sink, mapper):
         if name == "refuse" and (native["failure"] != ERROR_DLL_INIT_FAILED
                                  or mapped["failure"] != [STATUS["init_failed"], "entry point returned FALSE"]):
             raise AssertionError(f"refuse failures: native={native['failure']} mapped={mapped['failure']}")
-    print("native and mapped: TLS callback then entry point on attach and on detach, reserved null; "
-          "a FALSE entry point is followed by a full detach and the load fails")
+    print("native and mapped: TLS callback then entry point on process attach, on a new thread's attach and "
+          "detach, and on process detach, reserved null; a FALSE entry point is followed by a full detach "
+          "and the load fails")
     check_directory_fields(original, sink, mapper)
     check_rejections(original, sink, mapper)
 
