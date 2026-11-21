@@ -399,6 +399,28 @@ For 249 input pairs both callers match the provider's observed arguments, guarde
 
 The local Bink DLL imports ordinal 1 from XAudio2_9.dll. A read-only check confirmed an executable export at that ordinal in this workstation's System32 provider. The Bink call's argument and result contract remains unverified.
 
+## A source-built EXE and its translated build
+
+The [fixture](../tests/cpu/exe_route.asm) is a CRT-free console EXE linked with `/ENTRY:entry /NODEFAULTLIB`. The entry calls `route_mix` through `E8`, and `route_mix` calls `cpu_route_provider.dll!route_value` through its IAT slot. The entry compares the result with 100. Below it, the entry returns that result as the exit code, so the callee's arithmetic is visible; otherwise it returns 9. The [provider](../tests/cpu/route_provider.cpp) reads `ROUTE_INPUT` from the process environment, adds 200 for `high`, and writes its arguments and result to stdout. The EXE itself has no other import.
+
+The [translator](../tools/cpu_exe_aot.py) starts at `AddressOfEntryPoint` rather than at an export. It lifts the entry's 32-bit immediate moves, the R8 clear, the one direct call, a compare with a sign-extended immediate followed by one of `cpu_leaf_aot.py`'s unsigned or equality branches, and forward jumps. It rejects an image with TLS, delay imports or any import other than the bound one. Nothing is defined at entry; the loader's register values are not part of the profile. The callee is lifted by `cpu_call_aot.py`'s caller profile with the import bound to the provider, and kept internal to the generated unit. MSVC links the output as its own EXE, with `/ENTRY:lifted_entry /NODEFAULTLIB`, against the same provider import library. `tests/cpu/no_runtime_checks.h` is force-included so the Debug `/RTC1` checks do not need CRT hooks.
+
+```powershell
+cmake --build --preset dev --target cpu_exe_route_original cpu_exe_route_original_lifted cpu_exe_route_inverted cpu_exe_route_inverted_lifted cpu_route_provider
+ctest --preset dev --no-tests=error -R '^cpu_aot_exe_route$' -V
+```
+
+Each build runs 20 times per input in a fresh process. For `low` and `high`, the native and translated EXEs return the same exit codes, 17 and 9, write the same stdout bytes (`route_value 5 7 0000000000000000 -> 12` and `-> 212`) and nothing to stderr. The import arguments do not depend on the input; the provider's return does. A second fixture assembled with `jb` in place of `jae`, and translated the same way, returns 9 and 217 instead and leaves the provider output unchanged. Both builds import only `route_value`, and their entry bytes differ, so the translated EXE does not run a copy of the original entry. Rerunning the translator on each native EXE reproduces its generated source.
+
+Translation rejects three patched copies of the original EXE:
+- a jump that lands inside an instruction;
+- a backward branch;
+- an entry where RDX is undefined at the call, because `mov edx, 7` became `mov eax, 7`.
+
+It also rejects a DLL and a binding to a symbol the EXE does not import.
+
+Coverage is limited to this one-entry, one-callee, one-import profile; no negative compare immediate is exercised. Exit codes come from the entry's return. On Windows 11 build 26300, all 160 runs reported the expected code. CRT startup, TLS and process startup through `pe_map` are not covered; #165 tracks the last.
+
 ## Mapping an image without LoadLibrary
 
 `tools/pe_map.cpp` maps an x64 PE32+ image into memory it allocates itself, away from the preferred base, and applies its DIR64 base relocations. It binds ordinary and delay imports through a resolver supplied by the host, sets section protections, records the actual base in the mapped headers and registers `.pdata` with `RtlAddFunctionTable`. The original machine code runs unchanged. Header fields are checked against the file and image size before use. It then calls TLS callbacks and the entry point. TLS data templates are rejected. [Issue #46](https://github.com/R0Y00/Xbox2Windows/issues/46)

@@ -672,6 +672,36 @@ if(EXISTS "${INTAKE_PYTHON}")
         "$<TARGET_FILE:intake_forward>" "$<TARGET_FILE:intake_provider>")
     add_test(NAME layout_chunk_summary COMMAND "${INTAKE_PYTHON}" -B
         "${CMAKE_SOURCE_DIR}/tests/layout_chunks_check.py")
+
+    # A CRT-free EXE and its static recompilation, each linked as its own EXE against one provider.
+    add_library(cpu_route_provider SHARED tests/cpu/route_provider.cpp)
+    foreach(variant IN ITEMS original inverted)
+        add_executable(cpu_exe_route_${variant} tests/cpu/exe_route.asm)
+        set_target_properties(cpu_exe_route_${variant} PROPERTIES LINKER_LANGUAGE CXX)
+        target_link_options(cpu_exe_route_${variant} PRIVATE
+            /ENTRY:entry /NODEFAULTLIB /SUBSYSTEM:CONSOLE /INCREMENTAL:NO)
+        target_link_libraries(cpu_exe_route_${variant} PRIVATE cpu_route_provider)
+        set(lifted "${CMAKE_CURRENT_BINARY_DIR}/cpu_exe_route_${variant}_lifted.cpp")
+        add_custom_command(OUTPUT "${lifted}"
+            COMMAND "${INTAKE_PYTHON}" -B "${CMAKE_SOURCE_DIR}/tools/cpu_exe_aot.py"
+                "$<TARGET_FILE:cpu_exe_route_${variant}>" "${lifted}"
+                --bind "$<TARGET_FILE:cpu_route_provider>" route_value
+            DEPENDS cpu_exe_route_${variant} cpu_route_provider tools/cpu_exe_aot.py tools/cpu_call_aot.py
+                tools/cpu_leaf_aot.py tools/cpu_ranges.py VERBATIM)
+        add_executable(cpu_exe_route_${variant}_lifted "${lifted}")
+        target_compile_options(cpu_exe_route_${variant}_lifted PRIVATE /GS-
+            "/FI${CMAKE_SOURCE_DIR}/tests/cpu/no_runtime_checks.h")
+        target_link_options(cpu_exe_route_${variant}_lifted PRIVATE
+            /ENTRY:lifted_entry /NODEFAULTLIB /SUBSYSTEM:CONSOLE /INCREMENTAL:NO)
+        target_link_libraries(cpu_exe_route_${variant}_lifted PRIVATE cpu_route_provider)
+    endforeach()
+    target_compile_definitions(cpu_exe_route_inverted PRIVATE INVERT_BRANCH)
+    add_test(NAME cpu_aot_exe_route COMMAND "${INTAKE_PYTHON}" -B
+        "${CMAKE_SOURCE_DIR}/tests/cpu/exe_route_check.py"
+        "$<TARGET_FILE:cpu_exe_route_original>" "$<TARGET_FILE:cpu_exe_route_original_lifted>"
+        "$<TARGET_FILE:cpu_exe_route_inverted>" "$<TARGET_FILE:cpu_exe_route_inverted_lifted>"
+        "${CMAKE_CURRENT_BINARY_DIR}/cpu_exe_route_original_lifted.cpp"
+        "${CMAKE_CURRENT_BINARY_DIR}/cpu_exe_route_inverted_lifted.cpp")
 else()
     message(WARNING
         "Python-driven tests, including the CPU fixtures, are disabled because "
