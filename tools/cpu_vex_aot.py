@@ -1,8 +1,10 @@
-"""Recompile Windows x64 leaf functions that use VEX.128 16-bit packed-integer forms.
+"""Recompile Windows x64 leaf functions that use VEX.128 packed-integer forms.
 
 Profile: RCX and RDX hold the addresses of two 16-byte inputs and R8 the address of a 16-byte
-output; there is no return value. Memory operands are exactly [RCX], [RDX] or [R8] with a 16-byte
-access, loads from any of them and stores only to [R8]. Each XMM register becomes a 16-byte value
+output; there is no return value. Memory operands are exactly [RCX], [RDX] or [R8], loads from any
+of them and stores only to [R8]. Accesses are 16 bytes, except vmovq and vmovd, which read or write
+the low 8 or 4 bytes of the buffer; their register forms that use a general-purpose register are
+rejected. Each XMM register becomes a 16-byte value
 and each form an explicit per-lane loop, so the generated C++ spells out wraparound, saturation,
 shift-count and rounding rules instead of relying on the host compiler's intrinsics. Any other
 instruction, a VEX.256 (YMM) operand or another operand shape is rejected with its RVA.
@@ -40,9 +42,15 @@ BINARY = {
     M.VPMULHW: "pmulhw", M.VPAVGW: "pavgw", M.VPXOR: "pxor", M.VPAND: "pand", M.VPOR: "por",
     M.VPUNPCKLBW: "punpcklbw", M.VPUNPCKHBW: "punpckhbw", M.VPUNPCKLWD: "punpcklwd",
     M.VPUNPCKHWD: "punpckhwd", M.VPACKUSWB: "packuswb",
+    M.VPADDSW: "paddsw", M.VPMULLW: "pmullw", M.VPANDN: "pandn", M.VPAVGB: "pavgb",
+    M.VPSHUFB: "pshufb", M.VPMADDUBSW: "pmaddubsw",
 }
-SHIFTS = {M.VPSRAW: "psraw", M.VPSLLW: "psllw", M.VPSRLW: "psrlw"}
-MOVES = {M.VMOVDQU, M.VMOVDQA}
+# Forms whose last operand is an 8-bit immediate: element shifts, whole-register byte shifts and
+# the dword shuffle.
+IMMEDIATE = {M.VPSRAW: "psraw", M.VPSLLW: "psllw", M.VPSRLW: "psrlw", M.VPSRAD: "psrad",
+             M.VPSRLDQ: "psrldq", M.VPSLLDQ: "pslldq", M.VPSHUFD: "pshufd"}
+MOVES = {M.VMOVDQU, M.VMOVDQA, M.VMOVUPS, M.VMOVAPS}
+NARROW_MOVES = {M.VMOVQ: 8, M.VMOVD: 4}
 
 PRELUDE = r"""#include <cstdint>
 #include <cstring>
@@ -86,10 +94,47 @@ V punpckhwd(const V& a, const V& b) { V r{}; for (int i = 0; i < 4; ++i) { set_w
 std::uint8_t sat_u8(std::int16_t w) { return w < 0 ? 0 : w > 255 ? 255 : static_cast<std::uint8_t>(w); }
 V packuswb(const V& a, const V& b) { V r; for (int i = 0; i < 8; ++i) { r.b[i] = sat_u8(word(a, i)); r.b[8+i] = sat_u8(word(b, i)); } return r; }
 
+std::int16_t sat_s16(std::int32_t v) { return v < -32768 ? -32768 : v > 32767 ? 32767 : static_cast<std::int16_t>(v); }
 // Immediate shifts: a count above 15 fills arithmetic shifts with the sign and clears logical ones.
 V psraw(const V& a, unsigned n) { V r{}; for (int i = 0; i < 8; ++i) set_word(r, i, word(a, i) >> (n > 15 ? 15 : n)); return r; }
 V psllw(const V& a, unsigned n) { V r{}; for (int i = 0; i < 8; ++i) set_word(r, i, n > 15 ? 0 : uword(a, i) << n); return r; }
 V psrlw(const V& a, unsigned n) { V r{}; for (int i = 0; i < 8; ++i) set_word(r, i, n > 15 ? 0 : uword(a, i) >> n); return r; }
+
+std::int32_t dword(const V& v, int i) { std::int32_t d; std::memcpy(&d, v.b + 4 * i, 4); return d; }
+void set_dword(V& v, int i, std::int32_t d) { std::memcpy(v.b + 4 * i, &d, 4); }
+// Dword arithmetic shift: a count above 31 fills with the sign.
+V psrad(const V& a, unsigned n) { V r{}; for (int i = 0; i < 4; ++i) set_dword(r, i, dword(a, i) >> (n > 31 ? 31 : n)); return r; }
+// Whole-register byte shifts: bytes shifted in are zero, and a count above 15 clears the register.
+V psrldq(const V& a, unsigned n) { V r{}; for (int i = 0; i < 16; ++i) r.b[i] = i + n < 16 ? a.b[i + n] : 0; return r; }
+V pslldq(const V& a, unsigned n) { V r{}; for (int i = 0; i < 16; ++i) r.b[i] = i >= static_cast<int>(n) ? a.b[i - n] : 0; return r; }
+// Dword shuffle: result dword i is source dword (imm >> 2i) & 3.
+V pshufd(const V& a, unsigned imm) { V r{}; for (int i = 0; i < 4; ++i) set_dword(r, i, dword(a, (imm >> (2 * i)) & 3)); return r; }
+
+// Signed saturating word add and the low 16 bits of the word product.
+V paddsw(const V& a, const V& b) { V r{}; for (int i = 0; i < 8; ++i) set_word(r, i, sat_s16(word(a, i) + word(b, i))); return r; }
+V pmullw(const V& a, const V& b) { V r{}; for (int i = 0; i < 8; ++i) set_word(r, i, static_cast<std::int32_t>(word(a, i)) * word(b, i)); return r; }
+// AND NOT inverts the first source.
+V pandn(const V& a, const V& b) { V r; for (int i = 0; i < 16; ++i) r.b[i] = static_cast<std::uint8_t>(~a.b[i] & b.b[i]); return r; }
+// Unsigned byte average, rounded up.
+V pavgb(const V& a, const V& b) { V r; for (int i = 0; i < 16; ++i) r.b[i] = static_cast<std::uint8_t>((a.b[i] + b.b[i] + 1) >> 1); return r; }
+// Byte shuffle: a set bit 7 in the control byte gives zero, otherwise its low 4 bits select a byte.
+V pshufb(const V& a, const V& b) { V r; for (int i = 0; i < 16; ++i) r.b[i] = (b.b[i] & 0x80) ? 0 : a.b[b.b[i] & 15]; return r; }
+// Unsigned bytes of the first source times signed bytes of the second, adjacent pairs summed with
+// signed saturation into words.
+V pmaddubsw(const V& a, const V& b) {
+    V r{};
+    for (int i = 0; i < 8; ++i) {
+        const std::int32_t low = a.b[2 * i] * static_cast<std::int8_t>(b.b[2 * i]);
+        const std::int32_t high = a.b[2 * i + 1] * static_cast<std::int8_t>(b.b[2 * i + 1]);
+        set_word(r, i, sat_s16(low + high));
+    }
+    return r;
+}
+
+// Narrow moves: a load zeroes the bytes above the moved width; a store writes only that width.
+V load_low(const std::uint8_t* p, int width) { V v{}; std::memcpy(v.b, p, width); return v; }
+V low(const V& a, int width) { V v{}; std::memcpy(v.b, a.b, width); return v; }
+void store_low(std::uint8_t* p, const V& v, int width) { std::memcpy(p, v.b, width); }
 }  // namespace
 """
 
@@ -111,10 +156,10 @@ def operand(instruction, index, rva):
     raise ValueError(f"unsupported operand at RVA {rva:#x}")
 
 
-def memory(instruction, rva):
+def memory(instruction, rva, size=16):
     if (instruction.memory_base not in POINTERS or instruction.memory_index != R.NONE
             or instruction.memory_displacement != 0 or instruction.segment_prefix != R.NONE
-            or MemorySizeExt.size(instruction.memory_size) != 16):
+            or MemorySizeExt.size(instruction.memory_size) != size):
         raise ValueError(f"memory operand outside the 16-byte buffers at RVA {rva:#x}")
     return POINTERS[instruction.memory_base]
 
@@ -163,11 +208,23 @@ def lift(start, code):
                 lines.append(f"store(r8, {source});")
             else:
                 lines.append(f"{destination(instruction, rva)} = {operand(instruction, 1, rva)};")
+        elif op in NARROW_MOVES and instruction.op_count == 2:
+            width = NARROW_MOVES[op]
+            if instruction.op0_kind == K.MEMORY:
+                source = operand(instruction, 1, rva)
+                if memory(instruction, rva, width) != "r8":
+                    raise ValueError(f"store outside the output buffer at RVA {rva:#x}")
+                lines.append(f"store_low(r8, {source}, {width});")
+            elif instruction.op1_kind == K.MEMORY:
+                lines.append(f"{destination(instruction, rva)} = load_low({memory(instruction, rva, width)}, {width});")
+            else:
+                # Register to register (vmovq xmm, xmm); a general-purpose operand fails here.
+                lines.append(f"{destination(instruction, rva)} = low({operand(instruction, 1, rva)}, {width});")
         elif op in BINARY and instruction.op_count == 3:
             lines.append(f"{destination(instruction, rva)} = {BINARY[op]}("
                          f"{operand(instruction, 1, rva)}, {operand(instruction, 2, rva)});")
-        elif op in SHIFTS and instruction.op_count == 3 and instruction.op2_kind == K.IMMEDIATE8:
-            lines.append(f"{destination(instruction, rva)} = {SHIFTS[op]}("
+        elif op in IMMEDIATE and instruction.op_count == 3 and instruction.op2_kind == K.IMMEDIATE8:
+            lines.append(f"{destination(instruction, rva)} = {IMMEDIATE[op]}("
                          f"{operand(instruction, 1, rva)}, {instruction.immediate8}u);")
         else:
             raise ValueError(f"unsupported instruction {instruction} at RVA {rva:#x}")

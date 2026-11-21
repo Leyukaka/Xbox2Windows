@@ -16,8 +16,8 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[2] / "tools"))
 from cpu_leaf_aot import export_rva  # noqa: E402
 from cpu_vex_aot import lift, translate  # noqa: E402
 
-FUNCTIONS = ("widen_mix", "word_ops", "shift_edges", "store_reload", "aligned_ops")
-UNALIGNED = ("widen_mix", "word_ops", "shift_edges", "store_reload")  # vmovdqu-only functions
+FUNCTIONS = ("widen_mix", "word_ops", "shift_edges", "store_reload", "aligned_ops", "byte_ops", "dword_ops")
+UNALIGNED = ("widen_mix", "word_ops", "shift_edges", "store_reload", "byte_ops", "dword_ops")  # no aligned forms
 # Arena: guard | A | guard | B | guard | OUT | guard, each 16 bytes, starting 16-byte aligned.
 ZONES = {"a": 16, "b": 48, "out": 80}
 ARENA = 112
@@ -110,6 +110,9 @@ REJECTED = (
     ("C5 FA 6F 00", "vmovdqu xmm0,[rax]", "memory operand outside the 16-byte buffers"),
     ("C5 FA 7F 01", "vmovdqu [rcx],xmm0", "store outside the output buffer"),
     ("C5 F1 E1 C2", "vpsraw xmm0,xmm1,xmm2", "unsupported instruction"),
+    ("C4 E1 F9 6E C0", "vmovq xmm0,rax", "unsupported register operand"),
+    ("C5 F9 7E C0", "vmovd eax,xmm0", "unsupported destination"),
+    ("C5 FA 7E 41 08", "vmovq xmm0,[rcx+8]", "memory operand outside the 16-byte buffers"),
 )
 
 
@@ -200,7 +203,7 @@ def main():
         differing += reference != call(native["shift_edges"], a, b)
     if not differing:
         raise AssertionError("replacing vpsraw with vpsrlw changed no output")
-    for name in ("widen_mix", "word_ops", "store_reload", "aligned_ops"):
+    for name in ("widen_mix", "word_ops", "store_reload", "aligned_ops", "byte_ops", "dword_ops"):
         for a, b in pairs[:256]:
             if call(altered[name], a, b) != call(native[name], a, b):
                 raise AssertionError(f"altered fixture changed {name}")

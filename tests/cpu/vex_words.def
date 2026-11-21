@@ -4,3 +4,5 @@ EXPORTS
     shift_edges
     store_reload
     aligned_ops
+    byte_ops
+    dword_ops
