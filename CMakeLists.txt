@@ -538,6 +538,20 @@ if(EXISTS "${INTAKE_PYTHON}")
     add_test(NAME cpu_native_lifetime COMMAND "${INTAKE_PYTHON}" -B
         "${CMAKE_SOURCE_DIR}/tests/cpu/native_lifetime_check.py" "$<TARGET_FILE:pe_map>"
         "$<TARGET_FILE:cpu_tls_original>" "$<TARGET_FILE:cpu_tls_sink>")
+    # 3000 long export names for one routine, so the name strings and the tables span several pages.
+    set(many_exports_def "${CMAKE_CURRENT_BINARY_DIR}/many_exports.def")
+    set(many_exports_text "EXPORTS\n")
+    foreach(index RANGE 1 3000)
+        string(APPEND many_exports_text "    export_name_long_enough_to_spread_strings_over_pages_${index}=named_target\n")
+    endforeach()
+    file(WRITE "${many_exports_def}" "${many_exports_text}")
+    add_library(cpu_many_exports SHARED tests/cpu/many_exports.asm "${many_exports_def}")
+    set_target_properties(cpu_many_exports PROPERTIES LINKER_LANGUAGE CXX)
+    target_link_options(cpu_many_exports PRIVATE /NOENTRY /NODEFAULTLIB /INCREMENTAL:NO)
+    add_test(NAME cpu_native_map_hardening COMMAND "${INTAKE_PYTHON}" -B
+        "${CMAKE_SOURCE_DIR}/tests/cpu/native_map_hardening_check.py" "$<TARGET_FILE:pe_map>"
+        "$<TARGET_FILE:cpu_register_probe>" "$<TARGET_FILE:cpu_tls_original>" "$<TARGET_FILE:cpu_tls_sink>"
+        "$<TARGET_FILE:cpu_many_exports>")
     add_library(script_path_host SHARED tools/script_path_host.cpp)
     target_compile_features(script_path_host PRIVATE cxx_std_17)
     add_test(NAME script_path_links COMMAND "${INTAKE_PYTHON}" -B

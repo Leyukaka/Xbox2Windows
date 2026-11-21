@@ -116,6 +116,24 @@ bool readable(const void* address, std::size_t size) {
     return true;
 }
 
+// A NUL-terminated string at rva, read only from pages that are currently readable.
+const char* readable_string(const Image& image, std::uint64_t rva) {
+    if (rva >= image.size) return nullptr;
+    const auto* start = image.base + rva;
+    const auto* cursor = start;
+    const auto* end = image.base + image.size;
+    while (cursor < end) {
+        const auto page_end = reinterpret_cast<const std::uint8_t*>(
+            (reinterpret_cast<std::uintptr_t>(cursor) | 0xfff) + 1);
+        const auto* stop = page_end < end ? page_end : end;
+        if (!readable(cursor, static_cast<std::size_t>(stop - cursor))) return nullptr;
+        if (std::memchr(cursor, 0, static_cast<std::size_t>(stop - cursor)))
+            return reinterpret_cast<const char*>(start);
+        cursor = stop;
+    }
+    return nullptr;
+}
+
 constexpr std::uint64_t MAX_TLS_CALLBACKS = 256;
 constexpr const char* TOO_MANY_TLS_CALLBACKS = "more than 256 TLS callbacks";
 // dlattrRva: descriptor fields hold RVAs instead of virtual addresses. Every x64 linker sets it.
@@ -580,15 +598,22 @@ extern "C" __declspec(dllexport) void* pe_map_export(void* mapped, const char* n
     const Image image{static_cast<std::uint8_t*>(mapped), nt->OptionalHeader.SizeOfImage};
     const auto& exports = directory(nt, IMAGE_DIRECTORY_ENTRY_EXPORT);
     const auto* dir = exports.Size ? image.at<IMAGE_EXPORT_DIRECTORY>(exports.VirtualAddress) : nullptr;
-    if (!dir) return nullptr;
-    const auto* names = image.at<DWORD>(dir->AddressOfNames, dir->NumberOfNames);
-    const auto* ordinals = image.at<WORD>(dir->AddressOfNameOrdinals, dir->NumberOfNames);
-    const auto* functions = image.at<DWORD>(dir->AddressOfFunctions, dir->NumberOfFunctions);
+    // Sections are protected by now, and the image may reprotect pages: every table and string is
+    // checked for live readability before it is read.
+    if (!dir || !readable(dir, sizeof(IMAGE_EXPORT_DIRECTORY))) return nullptr;
+    const DWORD name_count = dir->NumberOfNames, function_count = dir->NumberOfFunctions;
+    const auto* names = image.at<DWORD>(dir->AddressOfNames, name_count);
+    const auto* ordinals = image.at<WORD>(dir->AddressOfNameOrdinals, name_count);
+    const auto* functions = image.at<DWORD>(dir->AddressOfFunctions, function_count);
     if (!names || !ordinals || !functions) return nullptr;
-    for (DWORD i = 0; i < dir->NumberOfNames; ++i) {
-        const char* exported = image.string(names[i]);
+    if (!readable(names, sizeof(DWORD) * std::size_t{name_count})
+        || !readable(ordinals, sizeof(WORD) * std::size_t{name_count})
+        || !readable(functions, sizeof(DWORD) * std::size_t{function_count}))
+        return nullptr;
+    for (DWORD i = 0; i < name_count; ++i) {
+        const char* exported = readable_string(image, names[i]);
         if (!exported || std::strcmp(exported, name) != 0) continue;
-        if (ordinals[i] >= dir->NumberOfFunctions) return nullptr;
+        if (ordinals[i] >= function_count) return nullptr;
         const DWORD rva = functions[ordinals[i]];
         // Forwarded exports point back into the export directory; they are not code here.
         if (rva >= exports.VirtualAddress && rva - exports.VirtualAddress < exports.Size) return nullptr;
