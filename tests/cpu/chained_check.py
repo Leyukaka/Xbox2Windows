@@ -16,7 +16,8 @@ from cpu_ranges import function_ranges
 
 
 def check(native, compiled, harness, native_jne=None, compiled_jne=None,
-          native_zero=None, compiled_zero=None, native_imm=None, compiled_imm=None):
+          native_zero=None, compiled_zero=None, native_imm=None, compiled_imm=None,
+          compiled_wide=None):
     probe = register_probe(str(harness))
     pairs = [(native, compiled, 7)]
     if native_jne is not None and compiled_jne is not None:
@@ -36,6 +37,20 @@ def check(native, compiled, harness, native_jne=None, compiled_jne=None,
             if (result != expected or regs != SENTINELS or kept != regs or status != 1
                     or actual != (trace[0], result, *trace[2:]) or slot.value != (value or 0)):
                 raise AssertionError((orig_path.name, value, result, actual, kept))
+
+    if compiled_wide is not None:
+        source = ctypes.CDLL(str(native)).choose_wide_value
+        lifted = ctypes.CDLL(str(compiled_wide)).try_lifted
+        second = 0x1122334455667788
+        for value, expected in ((0, (1 << 31) + 21),
+                                (1 << 63, second % (1 << 32) + 277)):
+            slot = Word(value)
+            address = ctypes.addressof(slot)
+            result, trace, regs = observe(probe, source, address, second)
+            status, actual, kept = observe(probe, lifted, address, second)
+            if (result != expected or regs != SENTINELS or kept != regs or status != 1
+                    or actual != (trace[0], expected, *trace[2:]) or slot.value != value):
+                raise AssertionError(("choose_wide_value", value, expected, result, actual, kept))
 
     with pefile.PE(str(native), fast_load=True) as pe:
         entry = export_rva(pe, "choose_value")

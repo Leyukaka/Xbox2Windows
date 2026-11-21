@@ -1,3 +1,4 @@
 EXPORTS
     choose_value
     neighbor
+    choose_wide_value

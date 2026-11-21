@@ -381,7 +381,7 @@ if(EXISTS "${INTAKE_PYTHON}")
         target_link_options(${image} PRIVATE /NOENTRY /NODEFAULTLIB /INCREMENTAL:NO)
     endfunction()
     function(cpu_translation image translator entry)
-        cmake_parse_arguments(BIND "FFX_DESTROY" "PROVIDER;SYMBOL;LINK_NAME;CALLBACK_OFFSET" "" ${ARGN})
+        cmake_parse_arguments(BIND "FFX_DESTROY" "PROVIDER;SYMBOL;LINK_NAME;CALLBACK_OFFSET;TARGET" "" ${ARGN})
         set(binding)
         if(BIND_FFX_DESTROY)
             list(APPEND binding --ffx-destroy)
@@ -395,14 +395,17 @@ if(EXISTS "${INTAKE_PYTHON}")
                 list(APPEND binding --link-name "${BIND_LINK_NAME}")
             endif()
         endif()
-        set(lifted "${CMAKE_CURRENT_BINARY_DIR}/${image}_lifted.cpp")
+        if(NOT BIND_TARGET)
+            set(BIND_TARGET "${image}_lifted")
+        endif()
+        set(lifted "${CMAKE_CURRENT_BINARY_DIR}/${BIND_TARGET}.cpp")
         add_custom_command(OUTPUT "${lifted}"
             COMMAND "${INTAKE_PYTHON}" -B "${CMAKE_SOURCE_DIR}/tools/${translator}.py"
                 "$<TARGET_FILE:${image}>" ${entry} "${lifted}" ${binding}
             DEPENDS ${image} ${BIND_PROVIDER} tools/${translator}.py tools/cpu_leaf_aot.py tools/cpu_ranges.py VERBATIM)
-        add_library(${image}_lifted SHARED "${lifted}")
+        add_library(${BIND_TARGET} SHARED "${lifted}")
         if(BIND_PROVIDER)
-            target_link_libraries(${image}_lifted PRIVATE ${BIND_PROVIDER})
+            target_link_libraries(${BIND_TARGET} PRIVATE ${BIND_PROVIDER})
         endif()
     endfunction()
     foreach(variant IN ITEMS original inverted)
@@ -473,6 +476,7 @@ if(EXISTS "${INTAKE_PYTHON}")
         "$<TARGET_FILE:cpu_narrow>" "$<TARGET_FILE:cpu_narrow_lifted>")
     cpu_asm_fixture(cpu_chained chained)
     cpu_translation(cpu_chained cpu_chained_aot choose_value)
+    cpu_translation(cpu_chained cpu_chained_aot choose_wide_value TARGET cpu_chained_wide_lifted)
     cpu_asm_fixture(cpu_chained_jne chained)
     target_compile_definitions(cpu_chained_jne PRIVATE USE_JNE)
     cpu_translation(cpu_chained_jne cpu_chained_aot choose_value)
@@ -675,7 +679,8 @@ if(EXISTS "${INTAKE_PYTHON}")
         "$<TARGET_FILE:cpu_chained_lifted>" "$<TARGET_FILE:cpu_register_probe>"
         "$<TARGET_FILE:cpu_chained_jne>" "$<TARGET_FILE:cpu_chained_jne_lifted>"
         "$<TARGET_FILE:cpu_chained_zero>" "$<TARGET_FILE:cpu_chained_zero_lifted>"
-        "$<TARGET_FILE:cpu_chained_imm>" "$<TARGET_FILE:cpu_chained_imm_lifted>")
+        "$<TARGET_FILE:cpu_chained_imm>" "$<TARGET_FILE:cpu_chained_imm_lifted>"
+        "$<TARGET_FILE:cpu_chained_wide_lifted>")
     add_test(NAME cpu_aot_direct_call COMMAND "${INTAKE_PYTHON}" -B
         "${CMAKE_SOURCE_DIR}/tests/cpu/direct_check.py" "$<TARGET_FILE:cpu_register_probe>"
         "$<TARGET_FILE:cpu_call_original>" "$<TARGET_FILE:cpu_call_original_lifted>"

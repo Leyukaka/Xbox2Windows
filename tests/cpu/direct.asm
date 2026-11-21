@@ -41,6 +41,9 @@ call_mix PROC FRAME
     mov rbx, rcx
     mov rsi, rdx
     add rcx, 7
+    ; Keep the argument unchanged while exercising a signed imm8.
+    sub rcx, -1
+    sub rcx, 1
     sub rdx, 3
 IFDEF IMPORT_MIX
     call QWORD PTR [__imp_mix_args]

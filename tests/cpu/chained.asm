@@ -1,7 +1,7 @@
 ; Explicit .pdata/.xdata lets the test place another function in the gap.
 OPTION DOTNAME
 .code
-PUBLIC choose_value, neighbor
+PUBLIC choose_value, neighbor, choose_wide_value
 choose_value PROC
     push rbx
     push rsi
@@ -59,6 +59,25 @@ finish_value::
     ret
 finish_end LABEL BYTE
 
+; Takes a pointer to a readable word and a second word.
+choose_wide_value PROC FRAME
+    sub rsp, 8
+    .allocstack 8
+    .endprolog
+    mov rax, [rcx]
+    test rax, rax
+    jz short wide_empty
+    mov [rsp], rdx
+    mov rdx, [rsp]
+    mov eax, edx
+    lea rax, [rax + 277]
+    jmp short wide_finish
+wide_empty:
+    mov eax, 80000015h
+wide_finish:
+    add rsp, 8
+    ret
+choose_wide_value ENDP
 .xdata SEGMENT READONLY
 ALIGN 4
 primary_info DB 1,6,3,0, 6,02h, 2,60h, 1,30h, 0,0
