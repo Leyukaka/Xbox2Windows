@@ -3240,7 +3240,16 @@ def check_mode_register_draw(directory, compiler, renderer, backend):
     source = directory / "mode_register.hlsl"
     shader = directory / "mode_register.cso"
     case = directory / "mode_register.case"
-    source.write_text(translate(mode_program()), encoding="ascii")
+    program = mode_program()
+    program[0] = "s_setreg_imm32_b32 hwreg(HW_REG_FLAT_SCR_LO), 0x0"
+    first_mode = program.index(HALF_RTZ)
+    # Channel 0 widens the selected half. The true arm preserves the input in s44.
+    program[first_mode:first_mode + 1] = [
+        "s_cmp_eq_u32 1, 1",
+        HALF_RTZ,
+        "s_cselect_b32 s44, s44, 0",
+    ]
+    source.write_text(translate(program), encoding="ascii")
     compile_shader(compiler, source, shader)
     draw = [renderer, backend, "--check-pixel-case", shader, case]
     for (first, second, third, last), wrongs in MODE_SETS:
@@ -3285,7 +3294,8 @@ def check_mode_register_controls():
                   "hwreg(HW_REG_MODE, 3, 2), 0", "hwreg(HW_REG_MODE, 0, 4), 12", "hwreg(HW_REG_MODE, 4, 4), 15",
                   "hwreg(HW_REG_MODE), 0", "hwreg(HW_REG_MODE), 0x2f0", "hwreg(HW_REG_STATUS, 2, 2), 0",
                   "hwreg(HW_REG_STATUS), 0", "hwreg(HW_REG_TRAPSTS, 2, 2), 3", "hwreg(HW_REG_LDS_ALLOC), 0",
-                  "hwreg(HW_REG_SHADER_CYCLES), 0", "hwreg(HW_REG_GPR_ALLOC), 0", "hwreg(HW_REG_IB_STS), 0"):
+                  "hwreg(HW_REG_SHADER_CYCLES), 0", "hwreg(HW_REG_GPR_ALLOC), 0", "hwreg(HW_REG_IB_STS), 0",
+                  "hwreg(HW_REG_MODE, 2, 3), 0"):
         expect_value_error(translate, [f"s_setreg_imm32_b32 {write}"] + plain, "Unsupported hardware register write")
     # The scratch base stays unobservable: its readers are not lowered.
     for reader in ("scratch_load_dword v12, off, s48", "scratch_store_dword off, v12, s48 offset:16",
@@ -3298,6 +3308,7 @@ def check_mode_register_controls():
         expect_value_error(translate, [f"s_setreg_imm32_b32 hwreg(HW_REG_MODE, 2, 2), {value}"] + plain,
                            "Unsupported binary16 rounding mode")
     # The register forms of the same access stay unsupported.
+    expect_value_error(translate, ["s_setreg_b32 hwreg(HW_REG_FLAT_SCR_LO), s44"] + plain, "Unsupported instruction")
     expect_value_error(translate, ["s_setreg_b32 hwreg(HW_REG_MODE, 2, 2), s48"] + plain, "Unsupported instruction")
     expect_value_error(translate, ["s_getreg_b32 s48, hwreg(HW_REG_MODE, 2, 2)"] + plain, "Unsupported instruction")
     # Like the hints, nothing may sit between the color export and s_endpgm.
