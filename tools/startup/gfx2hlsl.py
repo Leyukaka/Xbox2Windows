@@ -1242,6 +1242,8 @@ class Stage:
         if packed_result:
             if not 1 <= dmask <= 0xf:
                 raise Unsupported('image_%s d16: invalid dmask %#x (expected 0x1 through 0xf)' % (how, dmask))
+            if 'a16' in mods:
+                raise Unsupported('image_%s d16 with a16: packed data and packed addresses together are not lowered' % how)
             components = [comp for bit, comp in enumerate('xyzw') if dmask & (1 << bit)]
             required = (len(components) + 1) // 2
             if not dst or dst[0] != 'v' or not dst[1] <= dst[2] <= 255:

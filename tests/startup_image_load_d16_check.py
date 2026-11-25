@@ -77,6 +77,39 @@ def check_refusals():
     refuse('image_sample modifier d16', shader, encode(0xf, opcode=0x20))
     refuse('image_gather4_lz modifier d16', shader, encode(0x1, opcode=0x47))
     refuse('image_store', shader, encode(0xf, opcode=0x08))
+    refuse('d16 with a16', stage.one, 'image_load',
+           'image_load v4, v0, s[16:23] dmask:0x3 dim:SQ_RSRC_IMG_2D a16 d16')
+
+
+def check_array_mip():
+    # 2D array mip: x, y, slice, mip in four address VGPRs, as in startup_image_2d_array_check.py.
+    stage = shader(encode(0xf)).ps
+    stage.lines = []
+    stage.pipe.resources.clear()  # the fixture's 2D load already declared this descriptor as tex2d
+    stage.one('image_load_mip', 'image_load_mip v[4:5], v[0:3], s[16:23] dmask:0xf dim:SQ_RSRC_IMG_2D_ARRAY d16')
+    text = '\n'.join(stage.lines)
+    assert 'Load(int4(v0, v1, v2, v3))' in text, text
+    assert 'v4 = f32tof16(t.x) | (f32tof16(t.y) << 16);' in text, text
+    assert 'v5 = f32tof16(t.z) | (f32tof16(t.w) << 16);' in text, text
+
+
+def check_swapped_halves_mutation():
+    # A lowering that puts the second channel in the low half must fail the exact-text checks.
+    original = G.Stage.set_v
+
+    def swapped(stage, n, expr):
+        if ' | (' in expr and ' << 16)' in expr:
+            low, high = expr.split(' | (', 1)
+            expr = '%s | (%s << 16)' % (high[:-len(' << 16)')], low)
+        return original(stage, n, expr)
+
+    with patch.object(G.Stage, 'set_v', swapped):
+        try:
+            check_emission()
+        except AssertionError as error:
+            assert error.args and error.args[0][0] == 'd16 vdata writes', error
+        else:
+            raise AssertionError('the packed-result check accepted swapped halves')
 
 
 def check_negative_control():
@@ -97,6 +130,8 @@ def check_negative_control():
 if __name__ == '__main__':
     check_emission()
     check_refusals()
+    check_array_mip()
+    check_swapped_halves_mutation()
     check_negative_control()
     source = shader(encode(0xf, d16=False)).hlsl_ps()
     assert LOAD in source and all(f'v{n} = U(t.{c});' in source for n, c in enumerate('xyzw', 4)), source
