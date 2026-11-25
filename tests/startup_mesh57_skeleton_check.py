@@ -166,12 +166,16 @@ def controls():
             paired_text = (Path(tmp) / ('%016x.ms57.hlsl' % paired)).read_text()
             expect('mesh-only shader keeps every mesh_vertex mark of the pair',
                    text.count('mesh_vertex = true'), paired_text.count('mesh_vertex = true'))
-            # The poller tests file presence and size. Exercise it without a compiler.
+            # The poller needs a complete container envelope, without compiling a shader here.
+            part = struct.pack('<4sI4s', b'DXIL', 4, b'test')
+            bytecode = struct.pack('<4s16sHHIII', b'DXBC', bytes(16), 1, 0, 36 + len(part), 1, 36) + part
             os.environ.pop('X2W_FXC')
             mesh_bytecode = Path(tmp) / ('%016x.ms57.cso' % key)
-            mesh_bytecode.write_bytes(b'DXBC')
-            (Path(tmp) / ('%016x.ms57.cso' % paired)).write_bytes(b'DXBC')
+            mesh_bytecode.write_bytes(bytecode)
+            (Path(tmp) / ('%016x.ms57.cso' % paired)).write_bytes(bytecode)
             expect('only the pair missing its pixel bytecode is pending', G.pending_keys(tmp, False), [paired])
+            mesh_bytecode.write_bytes(bytecode[:-1])
+            expect('mesh-only result with truncated bytecode is pending', G.pending_keys(tmp, False), sorted([key, paired]))
             mesh_bytecode.unlink()
             expect('mesh-only result missing mesh bytecode is pending', G.pending_keys(tmp, False), sorted([key, paired]))
             os.environ['X2W_FXC'] = ''
@@ -267,7 +271,8 @@ def draw(dxc, renderer, adapter):
         expect('the fixture compiles without a pixel stage', result, 'ok')
         names = sorted(p.name[16:] for p in Path(tmp).iterdir() if not p.name.startswith('req_'))
         expect('mesh-only compiled files', names, ['.ms57.cso', '.ms57.hlsl', '.ms57.txt'])
-        expect('mesh-only bytecode was published', G.has_bytecode(str(Path(tmp) / ('%016x.ms57.cso' % key))), True)
+        expect('complete mesh-only bytecode was published',
+               G.has_complete_mesh57_bytecode(Path(tmp) / ('%016x.ms57.cso' % key)), True)
     points, colours, indices = geometry()
     with tempfile.TemporaryDirectory() as tmp:
         key, result = request(tmp, MESH)
