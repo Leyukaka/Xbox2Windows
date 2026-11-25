@@ -169,8 +169,21 @@ REFUSALS = (
      'slot 57 mesh: a branch enters or crosses a group-memory exchange'),
     ('a branch over the group-index exchange', MESH[:1] + [branch(0xbf82, 1, GROUP_END + 1)] + MESH[1:],
      'slot 57 mesh: a branch enters or crosses a group-memory exchange'),
+    # s_branch .post_count replaces s_waitcnt lgkmcnt(0) between the exchanges.
+    ('a branch over the count exchange',
+     mutate('bf8cc07f', branch(0xbf82, MESH.index('bf8cc07f'), POST_COUNT)),
+     'slot 57 mesh: a branch enters or crosses a group-memory exchange'),
     ('an indirect branch', mutate('bf8c3f70', 'be802014'),
      'slot 57 mesh: indirect control flow (s_setpc_b64) is not covered'),
+    # s_call_b64 s[20:21], 2 replaces s_waitcnt vmcnt(0) and targets the parameter export.
+    ('a call after the count exchange', mutate('bf8c3f70', 'bb140002'),
+     'slot 57 mesh: indirect control flow (s_call_b64) is not covered'),
+    # s_swappc_b64 s[20:21], s[22:23] replaces s_waitcnt vmcnt(0).
+    ('a PC swap after the count exchange', mutate('bf8c3f70', 'be942116'),
+     'slot 57 mesh: indirect control flow (s_swappc_b64) is not covered'),
+    # s_cbranch_execnz .join replaces s_cbranch_scc1 .join and keeps its forward target.
+    ('an EXEC-nonzero branch after the count exchange', mutate('bf850001', 'bf890001', mesh=BRANCH_CASES[0][1]),
+     'slot 57 mesh: s_cbranch_execnz on a wave-wide condition is not covered'),
     # v_cmp_ge_f32_e64 vcc_lo, v0, 1.0; s_cbranch_vccz .join; v_mov v7, 1.0
     ('a VCC-zero branch after a VGPR compare',
      vertex_red('7e0e0280 d406006a 0001e500 bf860001 7e0e02f2'),
