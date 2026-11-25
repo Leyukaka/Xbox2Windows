@@ -124,6 +124,10 @@ def controls():
         names = sorted(p.name[16:] for p in Path(tmp).iterdir() if not p.name.startswith('req_'))
         expect('published files', names, ['.ms57.hlsl', '.ms57.txt', '.ps57.hlsl'])
         expect('a translated request is not pending', G.pending_keys(tmp, False), [])
+        manifest = (Path(tmp) / ('%016x.ms57.txt' % key)).read_text().splitlines()
+        expect('paired manifest stage information',
+               [line for line in manifest if line.startswith(('params ', 'targets ', 'ps '))],
+               ['params 1', 'targets 0'])
         text = (Path(tmp) / ('%016x.ms57.hlsl' % key)).read_text()
         body = [line.strip() for line in text[text.index('void main('):].splitlines()]
         want = ['if (tid == 0u) { lds[0] = s13; lds[1] = s14; }', 'GroupMemoryBarrierWithGroupSync();',
@@ -143,11 +147,34 @@ def controls():
             expect(what + ': only the refusal is published',
                    sorted(p.name for p in Path(tmp).iterdir() if not p.name.startswith('req_')), ['%016x.fail' % key])
     with tempfile.TemporaryDirectory() as tmp:
-        ms, blob = code(MESH), root()
-        key = G.mesh57_key(ms, b'', blob)
-        for ext, data in (('.root', blob), ('.ps57', b''), ('.m57', ms)):
-            (Path(tmp) / ('req_%016x%s' % (key, ext))).write_bytes(data)
-        expect('no pixel stage', G.translate_request(tmp, key), 'unsupported: slot 57 mesh without a pixel stage is not covered')
+        key, result = request(tmp, MESH, [])
+        expect('the fixture translates without a pixel stage', result, 'ok')
+        if result == 'ok':
+            names = sorted(p.name[16:] for p in Path(tmp).iterdir() if not p.name.startswith('req_'))
+            expect('mesh-only source and manifest', names, ['.ms57.hlsl', '.ms57.txt'])
+            manifest = (Path(tmp) / ('%016x.ms57.txt' % key)).read_text().splitlines()
+            expect('mesh-only manifest stage information',
+                   [line for line in manifest if line.startswith(('params ', 'targets ', 'ps '))],
+                   ['params 0', 'ps none'])
+            text = (Path(tmp) / ('%016x.ms57.hlsl' % key)).read_text()
+            expect('mesh-only vertex fields', re.findall(r'struct VSOut \{([^}]*)\}', text), ['\n    float4 pos : SV_Position;\n'])
+            expect('mesh-only shader omits parameter writes', re.findall(r'\bo\.[fh]?param\d+', text), [])
+            expect('mesh-only shader writes position and indices', 'o.pos =' in text and 'tris[tid] =' in text, True)
+            expect('mesh-only manifest is enough in source-only mode', G.pending_keys(tmp, False), [])
+            paired, result = request(tmp, MESH)
+            expect('paired request for polling translates', result, 'ok')
+            paired_text = (Path(tmp) / ('%016x.ms57.hlsl' % paired)).read_text()
+            expect('mesh-only shader keeps every mesh_vertex mark of the pair',
+                   text.count('mesh_vertex = true'), paired_text.count('mesh_vertex = true'))
+            # The poller tests file presence and size. Exercise it without a compiler.
+            os.environ.pop('X2W_FXC')
+            mesh_bytecode = Path(tmp) / ('%016x.ms57.cso' % key)
+            mesh_bytecode.write_bytes(b'DXBC')
+            (Path(tmp) / ('%016x.ms57.cso' % paired)).write_bytes(b'DXBC')
+            expect('only the pair missing its pixel bytecode is pending', G.pending_keys(tmp, False), [paired])
+            mesh_bytecode.unlink()
+            expect('mesh-only result missing mesh bytecode is pending', G.pending_keys(tmp, False), sorted([key, paired]))
+            os.environ['X2W_FXC'] = ''
     # exp null off, off, off, off done vm; s_endpgm: a pixel stage without a colour output.
     with tempfile.TemporaryDirectory() as tmp:
         expect('a depth-only pixel stage', request(tmp, MESH, 'f8001890 00000000 bf810000'.split())[1],
@@ -235,6 +262,12 @@ def rasterise(points, colours, indices, verts, prims):
 def draw(dxc, renderer, adapter):
     os.environ['X2W_DXC'] = dxc
     os.environ.pop('X2W_FXC', None)
+    with tempfile.TemporaryDirectory() as tmp:
+        key, result = request(tmp, MESH, [])
+        expect('the fixture compiles without a pixel stage', result, 'ok')
+        names = sorted(p.name[16:] for p in Path(tmp).iterdir() if not p.name.startswith('req_'))
+        expect('mesh-only compiled files', names, ['.ms57.cso', '.ms57.hlsl', '.ms57.txt'])
+        expect('mesh-only bytecode was published', G.has_bytecode(str(Path(tmp) / ('%016x.ms57.cso' % key))), True)
     points, colours, indices = geometry()
     with tempfile.TemporaryDirectory() as tmp:
         key, result = request(tmp, MESH)
