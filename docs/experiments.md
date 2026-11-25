@@ -13940,7 +13940,9 @@ ctest --preset dev --no-tests=error -R '^startup_gfx2hlsl_cmp16_' -V
 python -B tests/startup_gfx2hlsl_cmp16_check.py binary <llvm-mc> <llvm-objcopy>
 ```
 
-`tools/startup/gfx2hlsl.py` also refuses the NEG bit of a VOP3 source that is a non-negative inline integer (0 to 64) or a literal. The disassembler prints inline 1 with NEG as `-1`, the same text as inline -1, so the text cannot tell the two encodings apart. The exception is the two data operands of `v_cndmask_b32_e64`, which model NEG as a flip of bit 31. The hardware behavior of NEG on integer sources is not measured. Check: `tests/startup_gfx2hlsl_refusals_check.py`.
+`tools/startup/gfx2hlsl.py` refuses VOP3 NEG on a non-negative inline integer (0 to 64) or a literal in integer and unclassified source slots. The disassembler prints inline 1 with NEG as `-1`, the same text as inline -1, so the text cannot tell the two encodings apart. The two data operands of `v_cndmask_b32_e64` model NEG as a flip of bit 31. `tests/startup_gfx2hlsl_refusals_check.py` covers these rules.
+
+For binary32 arithmetic and compare sources, the translator reads the inline integer (0 to 64) or literal dword from the VOP3 encoding, flips bit 31, and emits `F(0x........u)` using the existing `asfloat` macro. This follows LLVM AMDGPUAsmParser's immediate sign XOR and the RDNA 2 ISA's description of NEG as a float input modifier. The class mask and immediate ABS combined with NEG still refuse. RDNA hardware behavior for these immediate sources has not been measured. The D3D12 readback in `tests/startup_gfx2hlsl_neg_check.py` checks normal FMA and MED3 results, signed zero and normal MUL results, and allows signed flush-to-zero for subnormal MUL results.
 
 ## Startup translator: explicit-LOD image sampling
 
