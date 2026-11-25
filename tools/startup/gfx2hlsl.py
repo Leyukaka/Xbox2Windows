@@ -2791,9 +2791,6 @@ class Stage:
                               for t in srcs) and base.split('_')[1] in ('mov', 'and', 'or', 'xor', 'andn2', 'orn2', 'nand', 'nor', 'xnor', 'not', 'cselect')
         if base in ('s_mov_b32', 's_mov_b64', 's_movk_i32') and re.fullmatch(r'-?(0x[0-9a-f]+|\d+)', srcs[0]) and srcs[0] not in FLOATS:
             value = int(srcs[0], 0)
-            if base == 's_movk_i32' and 0x8000 <= value <= 0xffff:
-                value -= 0x10000  # the 16-bit immediate is sign-extended into the SGPR
-                values = ['0x%08xu' % (value & 0xffffffff)] + list(values[1:])
             self.set_s(d, values[0], ('const', value & 0xffffffff))
             if pair:
                 self.set_s(d + 1, '0x%08xu' % ((value >> 32) & 0xffffffff), ('const', (value >> 32) & 0xffffffff))
