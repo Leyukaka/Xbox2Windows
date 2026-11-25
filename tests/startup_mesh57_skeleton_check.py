@@ -151,6 +151,22 @@ REFUSALS = (
      'slot 57 mesh: a branch enters or crosses a group-memory exchange'),
     ('an indirect branch', mutate('bf8c3f70', 'be802014'),
      'slot 57 mesh: indirect control flow (s_setpc_b64) is not covered'),
+    # s_cbranch_vccz .join replaces the post-count SCC branch and keeps its forward target.
+    ('a forward VCC-zero branch', mutate('bf850001', 'bf860001', mesh=BRANCH_CASES[0][1]),
+     'slot 57 mesh: s_cbranch_vccz on a wave-wide condition is not covered'),
+    # s_cbranch_vccnz .join replaces the post-count SCC branch and keeps its forward target.
+    ('a forward VCC-nonzero branch', mutate('bf850001', 'bf870001', mesh=BRANCH_CASES[0][1]),
+     'slot 57 mesh: s_cbranch_vccnz on a wave-wide condition is not covered'),
+    # s_endpgm before the vertex count compare, with the original final s_endpgm still present.
+    ('an early program end', MESH[:POST_COUNT] + ['bf810000'] + MESH[POST_COUNT:],
+     'slot 57 mesh: an early s_endpgm is not covered'),
+    # s_or_b64 exec, exec, s[20:21] replaces the full EXEC reset after the else arm.
+    ('a saved EXEC read after the masked if/else', mutate('befe04c1', '89fe7e14', 3, mesh=masked_vertex_red()),
+     'slot 57 mesh: an unproven use of a saved EXEC mask is not covered'),
+    # s_branch .join leaves the fallthrough v_mov without an incoming edge.
+    ('untargeted code after an unconditional forward branch',
+     mutate('bf850001', 'bf820001', mesh=BRANCH_CASES[0][1]),
+     'slot 57 mesh: unreachable code after a branch is not covered'),
     ('a VGPR defined on only one incoming path', vertex_red('bf008080 bf850001 7e0e02f2'),
      'slot 57 mesh: v7 is read where it is not defined for every lane (an entry value, or left different per wave '
      'by an exchange)'),
