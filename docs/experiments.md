@@ -11621,6 +11621,16 @@ Tests: `startup_gfx2hlsl_cvt_alu_controls`, `startup_gfx2hlsl_cvt_alu_warp` and 
 ctest --preset dev --no-tests=error -R '^startup_gfx2hlsl_int_med3_controls$' -V
 ```
 
+## Startup translator: packed 16-bit image loads
+
+`tools/startup/gfx2hlsl.py` lowers `image_load` and `image_load_mip` with `d16`. The address is unchanged, including the VGPR-supplied mip of `image_load_mip`. The enabled channels are converted with `f32tof16` in ascending `dmask` bit order and packed two per destination VGPR, low half first; an odd last channel leaves the high half zero. The printed vdata range must have `ceil(popcount(dmask) / 2)` VGPRs, and an empty or wider `dmask` is refused. The lowering makes the same float-returning view assumption as the plain load path (`Texture*<float4>`); an integer view would need the bound view's format to choose a 16-bit integer result instead. `d16` on samples, gathers and stores stays refused.
+
+`tests/startup_image_load_d16_check.py` checks the decoded ranges and the emitted packing for `dmask` 0x1, 0x3, 0x7, 0xf and 0xa on both opcodes, the refusals, and a control that drops `d16` before lowering and requires the packing checks to fail. The `d16` cases were removed from the refusal loops of `startup_image_load_mip_check.py` and `startup_image_2d_array_check.py`.
+
+```powershell
+ctest --preset dev --no-tests=error -R '^startup_image_load_d16_controls$' -V
+```
+
 ## Startup translator: explicit-LOD image sampling
 
 `tools/startup/gfx2hlsl.py` now lowers the gfx1013 `image_sample_l` form of a 2D or 3D texture sample to `tex.SampleLevel(smp, uv, level)`. The level is the last address register: the third for a contiguous 2D address, the fourth for 3D, and the last element of an NSA list. `tests/startup_image_sample_l_check.py` translates source-built fixtures (the words are checked against `llvm-mc`) and requires the level to come from that register; an address list `[v0, v1, v3]` must use `v3`, not the third consecutive register. Replacing the level with 0, replacing the call with implicit `Sample`, or reading the third register in every form each make the check fail. Offset (`_o`), compare (`_c_l`), gather, 1D, array, cube and multisample dimensions, an empty `dmask`, and the `unorm`, `r128`, `tfe`, `lwe`, `a16` and `d16` modifiers or any set reserved MIMG bit are refused with an `Unsupported` message; only the cache-policy bits `glc`, `slc` and `dlc` are accepted because they do not change the sampled value. The disassembler previously read `lwe` from reserved bit 14 of word 0; `llvm-mc` (19, gfx1013) encodes it in bit 17, and the check now has one `llvm-mc`-built fixture per refused modifier plus patched reserved-bit fixtures. Not measured: no draw samples a mip level on WARP or hardware through this lowering, so the level selection is checked on the generated HLSL text only. [HLSL SampleLevel](https://learn.microsoft.com/en-us/windows/win32/direct3dhlsl/dx-graphics-hlsl-to-samplelevel)

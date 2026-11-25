@@ -68,7 +68,8 @@ def check_plain_load_layouts(llvm_mc):
     # Patch the length field and append a fake NSA word to check that the decoder preserves the refusal.
     invalid_nsa = '0a0f00f00004044001000000'
 
-    for flag, encoded in (('d16', '080f00f000040480'), ('tfe', '080f01f000040400'),
+    # d16 is lowered now (packed results; tests/startup_image_load_d16_check.py).
+    for flag, encoded in (('tfe', '080f01f000040400'),
                           ('r128', '088f00f000040400'), ('lwe', '080f02f000040400'),
                           ('reserved', '084f00f000040400'), ('dmask:0x0', '080000f000040400'),
                           ('a16', '100f00f000040440'), ('invalid_nsa', invalid_nsa)):
@@ -98,8 +99,9 @@ def check(llvm_mc):
         assert f'srv 0 {kind} table 0 0' in pipe.manifest(), name
         assert 'SamplerState' not in pipe.hlsl_ps(), name
         print(f'{name}: {address}, {kind}, no sampler')
-    # Packed data, packed addresses and fault-status returns need separate lowering.
-    for flag, byte, mask in (('d16', 7, 0x80), ('a16', 7, 0x40), ('tfe', 2, 0x01)):
+    # Packed addresses and fault-status returns need separate lowering. Packed data (d16) is lowered
+    # and checked in tests/startup_image_load_d16_check.py.
+    for flag, byte, mask in (('a16', 7, 0x40), ('tfe', 2, 0x01)):
         unsupported = bytearray.fromhex(CASES[0][2])
         unsupported[byte] |= mask
         try:

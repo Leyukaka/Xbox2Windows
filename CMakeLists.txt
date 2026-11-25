@@ -2277,6 +2277,9 @@ if(EXISTS "${INTAKE_PYTHON}")
     # Compute translator: scalar pair population count.
     add_test(NAME compute_alu_bcnt64_controls COMMAND "${INTAKE_PYTHON}" -B
         "${CMAKE_SOURCE_DIR}/tests/compute_alu_bcnt64_check.py")
+    # Startup shader translator: image_load and image_load_mip with packed 16-bit results (d16).
+    add_test(NAME startup_image_load_d16_controls COMMAND "${INTAKE_PYTHON}" -B
+        "${CMAKE_SOURCE_DIR}/tests/startup_image_load_d16_check.py")
     # Startup shader translator: signed and unsigned three-source integer min, max and median.
     add_test(NAME startup_gfx2hlsl_int_med3_controls COMMAND "${INTAKE_PYTHON}" -B
         "${CMAKE_SOURCE_DIR}/tests/startup_gfx2hlsl_int_med3_check.py")

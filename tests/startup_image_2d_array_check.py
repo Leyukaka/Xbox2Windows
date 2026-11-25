@@ -226,8 +226,9 @@ def mip_controls():
     accepted[1] |= 0x10  # unorm
     assert 't = %s;' % MIP_CALL in translate(mip_words(1, 0, bytes(accepted))).hlsl_ps()
 
-    # Refused: packed 16-bit data or addresses and fault-status returns need their own lowering.
-    for flag, byte, mask in (('d16', 7, 0x80), ('a16', 7, 0x40), ('tfe', 2, 0x01)):
+    # Refused: packed 16-bit addresses and fault-status returns need their own lowering. Packed 16-bit
+    # data (d16) is lowered and checked in tests/startup_image_load_d16_check.py.
+    for flag, byte, mask in (('a16', 7, 0x40), ('tfe', 2, 0x01)):
         refused = bytearray(MIP_IMAGE)
         refused[byte] |= mask
         try:
@@ -265,7 +266,7 @@ def mip_controls():
         other[0] = dim_code
         pipe = translate(mip_words(1, 0, bytes(other)))
         assert 't = r0.Load(%s);' % call in pipe.hlsl_ps() and 'srv 0 %s table 0 0' % kind in pipe.manifest(), pipe.hlsl_ps()
-    print('image_load_mip: d16, a16, tfe and a three-register address refused; cube refused; 2D and 3D unchanged')
+    print('image_load_mip: a16, tfe and a three-register address refused; cube refused; 2D and 3D unchanged')
 
     # The expected colours tell every swapped axis apart: all cells differ, and each mutant reads another one.
     cells = {mip_cell(x, y, s, m) for m in range(3) for s in range(2) for y in range(4 >> m) for x in range(4 >> m)}

@@ -1238,6 +1238,17 @@ class Stage:
         dst = reg_range(ops[0])
         dim = [m for m in mods if m.startswith('dim:')][0][4:]
         dmask = int([m for m in mods if m.startswith('dmask:')][0][6:], 0)
+        packed_result = how in ('load', 'load_mip') and 'd16' in mods
+        if packed_result:
+            if not 1 <= dmask <= 0xf:
+                raise Unsupported('image_%s d16: invalid dmask %#x (expected 0x1 through 0xf)' % (how, dmask))
+            components = [comp for bit, comp in enumerate('xyzw') if dmask & (1 << bit)]
+            required = (len(components) + 1) // 2
+            if not dst or dst[0] != 'v' or not dst[1] <= dst[2] <= 255:
+                raise Unsupported('image_%s d16: invalid vdata VGPR range %s' % (how, ops[0]))
+            if dst[2] - dst[1] + 1 != required:
+                raise Unsupported('image_%s d16: dmask %#x requires %d vdata VGPRs, got %s'
+                                  % (how, dmask, required, ops[0]))
         kinds = {'SQ_RSRC_IMG_1D': 'tex1d', 'SQ_RSRC_IMG_2D': 'tex2d', 'SQ_RSRC_IMG_3D': 'tex3d', 'SQ_RSRC_IMG_2D_ARRAY': 'tex2da'}
         if dim not in kinds:
             raise Unsupported('image dimension %s' % dim)
@@ -1277,6 +1288,8 @@ class Stage:
             allowed = ('unorm', 'glc', 'slc', 'dlc')
             if packed_2d:
                 allowed += ('a16',)
+            if packed_result:
+                allowed += ('d16',)
             unsupported = any(not m.startswith(('dim:', 'dmask:')) and m not in allowed for m in mods)
             wrong_address = (packed_2d and len(cs) != 1) or (how == 'load_mip' and len(cs) != axes + 1)
             if unsupported or wrong_address or not dmask:
@@ -1321,6 +1334,14 @@ class Stage:
             else:
                 call = '%s.Sample(%s, %s)' % (tex, smp, uv)
         self.emit('t = %s;' % call)
+        if packed_result:
+            # The Load returns float4, as it does for the plain result path.
+            for i in range(0, len(components), 2):
+                expr = 'f32tof16(t.%s)' % components[i]
+                if i + 1 < len(components):
+                    expr += ' | (f32tof16(t.%s) << 16)' % components[i + 1]
+                self.set_v(dst[1] + i // 2, expr)
+            return
         n = dst[1]
         for bit, comp in enumerate('xyzw'):
             if dmask & (1 << bit):
