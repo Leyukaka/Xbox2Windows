@@ -192,6 +192,12 @@ REFUSALS = (
     ('a VCC-nonzero branch after an intervening VCC write',
      vertex_red('7e0e0280 ' + VCC_COMPARE + ' 7d880086 bf870001 7e0e02f2'),
      'slot 57 mesh: s_cbranch_vccnz on a wave-wide condition is not covered'),
+    # v_cmp_gt_u32 vcc, 6, v0; s_and_saveexec_b64 s[20:21], vcc narrows EXEC; the uniform compare then writes VCC
+    # only for the narrowed lanes; s_mov_b64 exec, -1 restores the full mask before s_cbranch_vccz skips s_nop.
+    ('a VCC compare under a narrowed EXEC before the branch',
+     MESH[:POST_COUNT] + ['7d880086', 'be94246a'] + VCC_COMPARE.split() + ['befe04c1', 'bf860001', 'bf800000']
+     + MESH[POST_COUNT:],
+     'slot 57 mesh: s_cbranch_vccz on a wave-wide condition is not covered'),
     # Set uniform VCC, then keep the v_cmpx_gt_i32 that narrows EXEC before s_cbranch_vccz skips s_nop.
     ('a VCC-zero branch under narrowed EXEC',
      MESH[:POST_COUNT] + VCC_COMPARE.split() + [MESH[POST_COUNT], 'bf860001', 'bf800000'] + MESH[POST_COUNT + 1:],
