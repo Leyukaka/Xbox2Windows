@@ -192,6 +192,12 @@ REFUSALS = (
     ('a VCC-nonzero branch after an intervening VCC write',
      vertex_red('7e0e0280 ' + VCC_COMPARE + ' 7d880086 bf870001 7e0e02f2'),
      'slot 57 mesh: s_cbranch_vccnz on a wave-wide condition is not covered'),
+    # s_mov_b32 s40, 0.5; s_cmp_eq_i32 0, 0; s_cbranch_scc1 .join skips s_mov_b32 s40, 1.0; .join: the compare
+    # reads s40, written before the join, which Stage's uniform_source does not prove; s_cbranch_vccz skips s_nop.
+    ('a VCC compare on an SGPR written before a join',
+     MESH[:POST_COUNT] + ['bea803f0', 'bf008080', 'bf850001', 'bea803f2'] + VCC_COMPARE.split()[1:]
+     + ['bf860001', 'bf800000'] + MESH[POST_COUNT:],
+     'slot 57 mesh: s_cbranch_vccz on a wave-wide condition is not covered'),
     # v_cmp_gt_u32 vcc, 6, v0; s_and_saveexec_b64 s[20:21], vcc narrows EXEC; the uniform compare then writes VCC
     # only for the narrowed lanes; s_mov_b64 exec, -1 restores the full mask before s_cbranch_vccz skips s_nop.
     ('a VCC compare under a narrowed EXEC before the branch',
