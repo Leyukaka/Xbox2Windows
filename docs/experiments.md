@@ -14368,13 +14368,19 @@ allows the read, including at a branch target. The compute controls exercise con
 As in #2059, the run-time part of the address is rounded down to a multiple of 4. That rounding, and the
 handling of out-of-range stores, are assumptions, not measurements.
 
-One descriptor modification is accepted for a raw buffer store: clearing the stride field of dword 1. That is
+The stride-only exception for raw buffer stores clears the stride field of dword 1. That is
 `s_and_b32` of dword 1 with `0xc000ffff`, which keeps the base address bits 15:0 and bits 31:30. The result is
-the raw descriptor such a store already assumes. Any other mask, any other dword, a repeated modification, and
-the same clear on an image store stay refused. Loads through the descriptor still treat it as modified.
+the raw descriptor such a store already assumes. Repeated clears and the same clear on an image store stay
+refused. Loads through the descriptor still treat it as modified.
 
 Case I is case A with the clear before its store. The runner binds a root UAV and reads no descriptor, so the
 GPU run checks the translation, not the stride; the negative controls are the pure-Python refusals.
+
+Compute buffer stores also accept a structured-to-raw conversion from one descriptor load. The shader
+clears the stride in DW1[29:16], multiplies the original DW2 record count by the stride extracted from DW1
+(optionally clamped to at least 1 with `s_max_u32`), and sets DW3[29:28] (OOB_SELECT) to 3. Every other bit must match the load. Case I-raw uses the same
+byte-address store and read-back as case I. As with the stride-only case, matching out-of-range behavior
+requires the runtime to bind a UAV view sized to the resulting byte count.
 
 The runtime has no slot-67 path yet, so no translated compute program runs in the stand-in.
 

@@ -644,7 +644,7 @@ def names_one_value(sym):
     if sym is None:
         return False
     if sym[0] == 'desc':
-        return len(sym) == 4  # ('desc', source, load offset, dword); the 'modified' mark drops the written value
+        return len(sym) == 4  # ('desc', source, load offset, dword); a derived or 'modified' word names no loaded value
     # An add on a pointer keeps its symbol and marks it 'added' (the offset is not in the tuple), so only an
     # untouched pointer, exactly (kind, source), names one value.
     return sym[0] in ('const', 'ud', 'execcopy') or (sym[0] in ('ptr', 'ptrhi') and len(sym) == 2)
@@ -671,6 +671,43 @@ def desc_key(sym):
     """Resource key of the descriptor a ('desc', source, load offset, dword) word belongs to: the key descriptor()
     gives its first word, so a write into a later descriptor of a wide load marks that descriptor."""
     return sym[1], None if sym[2] is None else sym[2] + 4 * (sym[3] & ~3)
+
+
+def desc_word(sym, dword):
+    return sym[:3] + (dword,) + sym[4:]
+
+
+def raw_descriptor_alu(base, syms, constants):
+    """Recognize only the word expressions needed for a structured-to-raw buffer store."""
+    # gfx10 V# layout in docs/pixel_mubuf_contract.md: stride is DW1[29:16],
+    # NUM_RECORDS is DW2 and OOB_SELECT is DW3[29:28].
+    # The extracted stride may be clamped to at least 1 (s_max_u32 with 1), so that a descriptor that is
+    # already raw (stride 0) keeps NUM_RECORDS bytes.
+    if base == 's_max_u32':
+        for i, word in enumerate(syms):
+            if word and word[:2] == ('descnum', 'stride') and constants[1 - i] == 1:
+                return ('descnum', 'stride_min1', word[2])
+        return None
+    for i, word in enumerate(syms):
+        if not word or word[0] != 'desc' or len(word) < 4:
+            continue
+        other = 1 - i
+        field = word[3] % 4
+        plain = len(word) == 4  # a loaded word; its (source, offset, dword) names one descriptor value
+        if plain and field == 1:
+            if base == 's_and_b32' and constants[other] == 0xc000ffff:
+                return word + ('stride0',)
+            if base == 's_bfe_u32' and i == 0 and constants[1] == 0xe0010:
+                return ('descnum', 'stride', word)
+        if plain and field == 2 and base == 's_mul_i32':
+            if syms[other] in (('descnum', kind, desc_word(word, word[3] - 1)) for kind in ('stride', 'stride_min1')):
+                return word + ('byte_count',)
+        if field == 3:
+            if plain and base == 's_and_b32' and constants[other] == 0xcfffffff:
+                return word + ('oob0',)
+            if (plain or word[4:] == ('oob0',)) and base == 's_or_b32' and constants[other] == 0x30000000:
+                return word[:4] + ('oob3',)
+    return None
 
 
 def smem_offset(tok):
@@ -2912,6 +2949,8 @@ class Stage:
                 raise Unsupported('mask from descriptor data')
             d = reg_range(dname)[1]
             own = self.sym.get(d)
+            raw = (raw_descriptor_alu(base, syms, [self.const_u32(t) for t in srcs])
+                   if getattr(self, 'kind', None) == 'cs' and len(syms) == 2 else None)
             if base in ('s_mov_b32', 's_mov_b64'):
                 self.sym[d] = syms[0]
                 if pair:
@@ -2927,17 +2966,16 @@ class Stage:
                             self.sym[d + 1] = hi
                         elif self.tracks_uniformity():
                             self.varying_s.add(d + 1)
+            elif raw is not None:
+                self.sym[d] = raw
+                if raw[0] == 'desc':
+                    self.pipe.modified.add(desc_key(raw))
             elif own and own[0] in ('desc', 'ptr', 'ptrhi') and any(s == own for s in syms):
                 if own[0] == 'desc':
                     self.pipe.modified.add(desc_key(own))
-                    # The word keeps its descriptor identity for loads; the store check (store_descriptor) sees the
-                    # mark. In a compute stage, clearing the stride field of dword 1 (bits 29:16, keeping the base
-                    # address bits 15:0 and bits 31:30) is marked on its own: a raw byte-address store accepts it.
-                    stride0 = (getattr(self, 'kind', None) == 'cs' and base == 's_and_b32' and len(own) == 4
-                               and own[3] % 4 == 1 and sorted(srcs) == sorted([dname, '0xc000ffff']))
-                    self.sym[d] = own[:4] + ('stride0' if stride0 else 'modified',)
-                    if not stride0:
-                        getattr(self.pipe, 'other_modified', set()).add(desc_key(own))
+                    # Keep the resource identity for loads; stores refuse the unproved value.
+                    self.sym[d] = own[:4] + ('modified',)
+                    getattr(self.pipe, 'other_modified', set()).add(desc_key(own))
                 else:
                     self.sym[d] = own if len(own) > 2 else own + ('added',)  # the added offset is not tracked
             else:
@@ -3598,25 +3636,28 @@ class Stage:
         self.emit('a = (%s%d) & 0xfffffffcu;' % (soffset, offset) if soffset else 'a = %d;' % offset)
         self.emit(store if self.exec_known else 'if (exec & 1) %s' % store)
 
-    def store_descriptor(self, tok, words, what, stride0_ok=False):
-        """Resource key of a store's descriptor operand: all its words must still be the loaded words of one
-        descriptor at a fixed table offset. A moved, overwritten or modified word (stride, num_records, format)
-        would change what the store does. With stride0_ok (a raw byte-address store), dword 1 may carry a cleared
-        stride field: that is the raw descriptor such a store already assumes."""
+    def store_descriptor(self, tok, words, what, stride0_ok=False, raw_conversion_ok=False):
+        """Resource key for a single loaded descriptor or a proven raw transformation of it."""
         rsrc = reg_range(tok)
         first = self.sym.get(rsrc[1]) if rsrc and rsrc[0] == 's' and rsrc[2] - rsrc[1] == words - 1 else None
         if not first or first[0] != 'desc' or first[1][0] != 'table' or first[2] is None or first[3] % 4:
             raise Unsupported('%s through %s holding %s' % (what, tok, first))
         key = desc_key(first)
-        def word_ok(k):
-            sym, want = self.sym.get(rsrc[1] + k), first[:3] + (first[3] + k,)
-            return sym == want or (stride0_ok and k == 1 and sym == want + ('stride0',))
-        if (not all(word_ok(k) for k in range(words)) or key in getattr(self.pipe, 'other_modified', ())
+        loaded = tuple(desc_word(first, first[3] + k) for k in range(words))
+        actual = tuple(self.sym.get(rsrc[1] + k) for k in range(words))
+        valid = names_one_value(first) and actual == loaded
+        if names_one_value(first) and stride0_ok and words == 4:
+            cleared = loaded[1] + ('stride0',)
+            valid = valid or actual == (loaded[0], cleared, *loaded[2:])
+            if not valid and raw_conversion_ok:
+                valid = actual == (loaded[0], cleared, loaded[2] + ('byte_count',), loaded[3] + ('oob3',))
+        if (not valid or key in getattr(self.pipe, 'other_modified', ())
                 or (key in self.pipe.modified and not stride0_ok)):
             raise Unsupported('%s through a modified descriptor' % what)
         return key
 
-    def raw_table_uav_store(self, kind_label, ops, mods, data_count, *, allow_glc=False, allow_scalar_address=False):
+    def raw_table_uav_store(self, kind_label, ops, mods, data_count, *, allow_glc=False, allow_scalar_address=False,
+                            raw_conversion_ok=False):
         """Validate a fixed-table raw UAV descriptor, data range, byte address, and 4-byte alignment."""
         offset = 0
         glc = False
@@ -3637,7 +3678,7 @@ class Stage:
             vaddr = reg_range(ops[1])
             if not vaddr or vaddr[0] != 'v' or vaddr[1] != vaddr[2] or vaddr[1] > 255:
                 raise Unsupported('%s vaddr %s for offen' % (kind_label, ops[1]))
-        key = self.store_descriptor(ops[2], 4, kind_label, stride0_ok=True)
+        key = self.store_descriptor(ops[2], 4, kind_label, stride0_ok=True, raw_conversion_ok=raw_conversion_ok)
         terms = [self.u(ops[1])] if offen else []
         if re.fullmatch(r'0x[0-9a-f]+|\d+', ops[3]):
             if not offen:
@@ -3662,7 +3703,7 @@ class Stage:
             return self.op_buffer_store_vs(ops, mods, count)
         if self.kind != 'cs':
             raise Unsupported('buffer_store_dword' + ('x%d' % count if count > 1 else ''))  # the unknown-op refusal
-        src, uav, address, _ = self.raw_table_uav_store('buffer store', ops, mods, count)
+        src, uav, address, _ = self.raw_table_uav_store('buffer store', ops, mods, count, raw_conversion_ok=True)
         words = [self.u('v%d' % n) for n in range(src[1], src[2] + 1)]
         data = words[0] if count == 1 else 'uint%d(%s)' % (count, ', '.join(words))
         # Store* needs a multiple of four. As in #2059, the run-time part (VGPR and register soffset) is rounded down:
@@ -3878,8 +3919,9 @@ class Stage:
         # FORMAT and DST_SEL are read from the table word, so word 3 must still be the loaded one.
         r = reg_range(ops[2])
         first = self.sym.get(r[1]) if r else None
-        if not r or r[0] != 's' or r[2] - r[1] != 3 or not first or first[0] != 'desc' or any(
-                self.sym.get(r[1] + i) != ('desc', first[1], first[2], first[3] + i) for i in range(4)):
+        if (not r or r[0] != 's' or r[2] - r[1] != 3 or not first or first[0] != 'desc'
+                or not names_one_value(first) or any(
+                    self.sym.get(r[1] + i) != desc_word(first, first[3] + i) for i in range(4))):
             raise Unsupported('formatted buffer load through a descriptor whose words were rewritten')
         if first[1][0] != 'table':
             raise Unsupported('formatted buffer load requires a hardware table descriptor')
@@ -4251,7 +4293,7 @@ class Stage:
         if not first or first[0] != 'desc' or first[1][0] != 'table' or first[2] is None or first[3] % 8:
             raise Unsupported('%s requires a fixed table image descriptor' % name)
         for i in range(8):
-            word = first[:3] + (first[3] + i,)
+            word = desc_word(first, first[3] + i)
             # A write through a second load of this descriptor can leave these SGPR symbols intact.
             if self.sym.get(image[1] + i) != word or desc_key(word) in self.pipe.modified:
                 raise Unsupported('%s through a modified image descriptor' % name)
@@ -6064,7 +6106,7 @@ class ComputePipeline(Pipeline):
         self.uses_gather_2d_lod = False
         self.uses_sad = set()
         self.resources, self.uavs, self.samplers, self.uds = {}, {}, {}, []
-        self.notes, self.modified, self.other_modified = set(), set(), set()  # other: anything but a stride clear
+        self.notes, self.modified, self.other_modified = set(), set(), set()  # other: unproved descriptor writes
         self.lod_unvalidated = set()
         # LLVM AMDGPUUsage, COMPUTE_PGM_RSRC2.GRANULATED_LDS_SIZE on gfx10: 128 dwords per unit.
         self.lds_words = ((rsrc2 >> 15) & 0x1ff) * 128
