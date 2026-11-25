@@ -9251,8 +9251,8 @@ and compiles them as `ms_6_5` and `ps_6_0` (without a pixel program, to
 `.ms57.hlsl` alone; see below). In that shape lane 0 of wave 0
 stores the primitive and vertex counts, every wave passes a barrier, wave 0
 sends one allocation request and the other wave reads the counts back; the
-code around it is straight-line and exports vertex and primitive `thread`
-under `count > thread`. `mesh_skeleton` in `tools/startup/gfx2hlsl.py` states
+code around it exports vertex and primitive `thread` under
+`count > thread`. `mesh_skeleton` in `tools/startup/gfx2hlsl.py` states
 the shape and refuses every other program with the first difference. The
 lowering clamps both counts to the 128 threads of a group and each index to
 the last vertex. It reads 9-bit indices, ignores the edge flags, and gives a
@@ -9282,6 +9282,16 @@ The pending scan checks the DXContainer header and file length for every
 required slot 57 bytecode artifact. A `ps none` result needs the mesh artifact
 only. A missing or truncated required artifact leaves the request pending
 even if its manifest exists. In manifest-only mode the manifest completes it.
+
+The code outside the exchanges accepts forward `s_branch` and wave-uniform
+SCC branches. A forward `s_cbranch_execz` can skip guarded lane writes, including
+the masked arm of an if/else formed with `s_and_saveexec_b64` and a proven
+complement. The proof checks register definitions and output masks at joins.
+Loops, indirect jumps and calls, branches entering or crossing either exchange,
+and unproven wave masks remain unsupported. Use
+`python -B tests/startup_mesh57_skeleton_check.py` for translations and refusals.
+Append `draw <dxc> <offscreen_check> <warp|hardware>` for CPU-reference readback
+of the SCC paths and lane-masked if/else.
 
 Set `X2W_REFUSE_FIXED_MESH=1` to report unavailable fixed mesh pipelines at
 slot 57 creation. The descriptor must name a registered root, have an empty
