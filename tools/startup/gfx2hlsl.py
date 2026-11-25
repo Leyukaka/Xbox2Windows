@@ -3215,13 +3215,15 @@ class Stage:
             mask_dest = (dname in ('exec', 'exec_lo', 'exec_hi', 'vcc', 'vcc_lo', 'vcc_hi') if base == 's_mul_hi_u32'
                          else self.is_lane_mask(dname))
             # Bit i of ~(S0 op S1) depends only on bit i of each source, so with every source a lane mask the lane's
-            # bit of the result is exact. Only an SGPR destination is taken; a mixed mask and plain word is not.
+            # bit of the result is exact for SGPR destinations and for NAND/NOR into exec_lo.
             def mask_source(tok):
                 r = reg_range(tok)
                 return tok in ('vcc', 'vcc_lo', 'exec', 'exec_lo') or bool(
                     r and r[0] == 's' and r[1] == r[2] and r[1] in self.masks)
-            lane_complement = (word_complement and bool(dst) and dst[0] == 's' and dst[1] == dst[2] and dst[1] <= 105
-                               and all(mask_source(t) for t in srcs))
+            sgpr_dest = bool(dst) and dst[0] == 's' and dst[1] == dst[2] and dst[1] <= 105
+            exec_dest = dname == 'exec_lo' and base in ('s_nand_b32', 's_nor_b32')
+            lane_complement = (word_complement and (sgpr_dest or exec_dest)
+                               and all(mask_source(t) for t in (ops[1:] if exec_dest else srcs)))
             if not lane_complement and (mask_dest or any(self.is_lane_mask(t) for t in srcs)):
                 raise Unsupported('%s on a lane mask' % base)
             if lane_complement and any(reg_range(t) and reg_range(t)[1] in getattr(self, 'join_masks', ())
@@ -3307,6 +3309,12 @@ class Stage:
             self.used_s.add(reg_range(srcs[absorbed])[1])
         values = [t if i == absorbed else self.u(t) for i, t in enumerate(srcs)]
         expr = text.format(*values)
+        if lane_complement:
+            # Guest SCC depends on the whole complemented word. Refuse a program that can read it.
+            scc = None
+            self.scc_effect = 'a lane-mask complement'
+            if self.tracks_uniformity():
+                self.scc_uniform = False
         if shift_add:
             # carry = bits shifted out of S0, or a wrap of the 32-bit sum; read before the destination is written
             n = SHIFT_ADD[base]
@@ -3381,17 +3389,11 @@ class Stage:
             high_source = 's%d' % high if high is not None else srcs[0]
             high_uniform = (self.tracks_uniformity() and high != d and
                             self.uniform_source(high_source))
-        self.set_s(d, expr, scc=None if lane_complement else scc)
+        self.set_s(d, expr, scc=scc)
         if base == 's_mov_b32' and srcs[0] in FLOATS and not is_mask:
             # Keep the runtime SGPR assignment intact while letting const_words() read inline float patterns
             # such as 0x40000000 (OPAQUE_BLACK, encoded as inline 244 / '2.0').
             self.__dict__.setdefault('float_const_s', {})[d] = fbits(FLOATS[srcs[0]])
-        if lane_complement:
-            # The guest SCC is (the whole complemented word != 0), which the bits of every other lane decide (an
-            # idle lane's bit is set). It is not emitted: translate() refuses a program that can read it.
-            self.scc_effect = 'a lane-mask complement'
-            if self.tracks_uniformity():
-                self.scc_uniform = False
         if is_mask:
             self.masks.add(d)
         if pair and base != 's_mov_b64':
