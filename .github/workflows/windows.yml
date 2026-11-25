@@ -266,6 +266,7 @@ jobs:
             tests/startup_gfx2hlsl_draw_skip_check.py \
             tests/startup_gfx2hlsl_sdwa_cvt_check.py \
             tests/startup_gfx2hlsl_sop2_complement_check.py \
+            tests/startup_gfx2hlsl_pack_absdiff_check.py \
             tests/startup_gfx2hlsl_sopk_accum_check.py \
             tests/startup_gfx2hlsl_f32_lg_check.py \
             tests/startup_gfx2hlsl_f32_nan_check.py \
