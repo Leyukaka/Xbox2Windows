@@ -1276,7 +1276,11 @@ def mesh_run(ins, at, what, patterns, env):
     return at + len(patterns)
 
 
-def mesh_skeleton(ins):
+MESH_VCC_BRANCHES = ('s_cbranch_vccz', 's_cbranch_vccnz')
+VCC_KEYS = {'vcc', 'vcc_hi'}
+
+
+def mesh_skeleton(ins, vcc_branches):
     """Prove the one accepted group-memory shape of a slot 57 mesh program and replace it by per-thread instructions.
 
     Accepted shape, in program order (anything else is refused with its own message):
@@ -1344,7 +1348,7 @@ def mesh_skeleton(ins):
                 raise Unsupported('slot 57 mesh: a branch enters or crosses a group-memory exchange')
             if target <= off:
                 raise Unsupported('slot 57 mesh: a loop outside the group-memory exchanges is not covered')
-            if name not in ('s_branch', 's_cbranch_scc0', 's_cbranch_scc1', 's_cbranch_execz'):
+            if name not in ('s_branch', 's_cbranch_scc0', 's_cbranch_scc1', 's_cbranch_execz') + MESH_VCC_BRANCHES:
                 raise Unsupported('slot 57 mesh: %s on a wave-wide condition is not covered' % name)
             edges[i] = dest
 
@@ -1379,6 +1383,9 @@ def mesh_skeleton(ins):
     thread = base = None   # VGPR of the thread index, SGPR holding wave << 6
     thread_high = None    # second instruction of a proven adjacent v_mbcnt pair
     scc_stale = False
+    # Possible last full-EXEC compare offsets. An empty set means some path lacks such a definition.
+    # The exchanges preserve VCC. Stage.translate checks the sources against its SGPR facts at each definition.
+    vcc_compares = frozenset()
     exports = []
     incoming = {}
     falls = True
@@ -1387,7 +1394,7 @@ def mesh_skeleton(ins):
         if index in targets:
             paths = incoming[index]
             if falls:
-                paths.append((stale, pending, mask, wave_known, thread, base, scc_stale))
+                paths.append((stale, pending, mask, wave_known, thread, base, scc_stale, vcc_compares))
             stale = set().union(*(p[0] for p in paths))
             pending = set().union(*(p[1] for p in paths))
             mask = paths[0][2]
@@ -1398,6 +1405,8 @@ def mesh_skeleton(ins):
             wave_known = all(p[3] for p in paths)
             thread, base = (paths[0][k] if all(p[k] == paths[0][k] for p in paths) else None for k in (4, 5))
             scc_stale = any(p[6] for p in paths)
+            definitions = [p[7] for p in paths]
+            vcc_compares = frozenset().union(*definitions) if all(definitions) else frozenset()
             falls = True
         if not falls:
             raise Unsupported('slot 57 mesh: unreachable code after a branch is not covered')
@@ -1436,8 +1445,12 @@ def mesh_skeleton(ins):
         if index in edges:
             if scc_stale and reads_scc(name, asm):
                 raise Unsupported('slot 57 mesh: an unmodelled SCC is read by a branch')
+            if name in MESH_VCC_BRANCHES:
+                if mask is not None or not vcc_compares:
+                    raise Unsupported('slot 57 mesh: %s on a wave-wide condition is not covered' % name)
+                vcc_branches[off] = vcc_compares
             incoming.setdefault(edges[index], []).append(
-                (stale.copy(), pending.copy(), mask, wave_known, thread, base, scc_stale))
+                (stale.copy(), pending.copy(), mask, wave_known, thread, base, scc_stale, vcc_compares))
             out.append(ins[index])
             falls = name != 's_branch'
             continue
@@ -1474,6 +1487,11 @@ def mesh_skeleton(ins):
             raise Unsupported('slot 57 mesh: SCC of the count exchange is read')
         if name.startswith(('s_cmp', 's_bitcmp')):
             scc_stale = False
+        if scalar_effects(name, asm)[2] & VCC_KEYS:
+            vcc_compares = frozenset({off}) if (
+                mask is None and base_name.startswith('v_cmp_') and name.endswith(('_e32', '_e64'))
+                and len(ops) == 3 and ops[0] in ('vcc', 'vcc_lo')
+            ) else frozenset()
         # Saveexec uses a fresh VCC from an adjacent compare. Only the matching complement can read the
         # saved mask. Hardware SCC (whether any bit is set) is not represented by a per-lane boolean.
         if asm == 's_mov_b64 exec, -1':
@@ -1570,7 +1588,8 @@ class Stage:
         else:
             self.ins = decode(strip_header(code), refusals) if decoded is None else decoded
         if kind == 'ms':
-            self.ins = mesh_skeleton(self.ins)
+            self.mesh_vcc_branches = {}
+            self.ins = mesh_skeleton(self.ins, self.mesh_vcc_branches)
         # A loop header is translated before the back edges into it, so whether a back edge brings the symbol kept
         # there is known only afterwards: translate again with that register read at run time or refused there. A
         # register only moves from kept to 'run' to 'refuse', so this ends.
@@ -2233,6 +2252,8 @@ class Stage:
 
     def translate(self):
         refusals = getattr(self, 'refusals', None)  # unit probes build a Stage without __init__
+        vcc_branches = getattr(self, 'mesh_vcc_branches', {})
+        vcc_compares = set().union(*vcc_branches.values())
         try:
             self.calculated_pc = calculated_pc_proof(self.ins, getattr(self, 'kind', None))
         except Unsupported as reason:
@@ -2289,6 +2310,7 @@ class Stage:
 
         for _ in range(max(4, len(self.ins) + 2)):
             scc_effects = {}
+            uniform_vcc_compares = set()
             self.lines = []
             self.blocks = []          # (offset, [lines], terminator)
             self.sym = dict(init_sym)
@@ -2437,9 +2459,18 @@ class Stage:
                     if off in refused:
                         raise Unsupported(refused[off])
                     base = re.sub(r'_e(32|64)$', '', name)
+                    if off in vcc_compares and all(
+                        not mesh_vregs([tok]) and self.uniform_source(tok)
+                        for tok in parse(asm)[1][1:]
+                    ):
+                        uniform_vcc_compares.add(off)
                     if base.startswith('s_cbranch_'):
                         cond = base[10:]
                         cond_uniform = cond in ('scc0', 'scc1') and self.scc_uniform
+                        if off in vcc_branches:
+                            if not vcc_branches[off] <= uniform_vcc_compares:
+                                raise Unsupported('slot 57 mesh: %s on a wave-wide condition is not covered' % name)
+                            cond_uniform = True
                         if not cond_uniform:
                             b_target = int(parse(asm)[1][0].split('_')[1], 16)
                             regs, affected = div_targets.get(off, (set(), set()))

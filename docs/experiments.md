@@ -9407,6 +9407,13 @@ and unproven wave masks remain unsupported. Use
 Append `draw <dxc> <offscreen_check> <warp|hardware>` for CPU-reference readback
 of the SCC paths and lane-masked if/else.
 
+A forward `s_cbranch_vccz` or `s_cbranch_vccnz` can also branch on the
+lane's VCC bit when EXEC is full and every incoming path last wrote VCC with
+a full-EXEC `v_cmp_*` from wave-uniform SGPRs or constants. A compare with a
+VGPR source, a different VCC write, or a narrowed EXEC at the branch
+invalidates the proof. The CPU-reference draws cover both outcomes for each
+branch polarity and a VCC-zero branch after a join.
+
 Set `X2W_REFUSE_FIXED_MESH=1` to report unavailable fixed mesh pipelines at
 slot 57 creation. The descriptor must name a registered root, have an empty
 VS slot and have a readable 16-byte to 64-KiB MS span. The PS span must be
