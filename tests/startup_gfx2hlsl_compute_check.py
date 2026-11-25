@@ -476,6 +476,8 @@ SPLICE = {
     's_or_b32 s19, s19, 0x20000000': '13ff138800000020',
     's_load_dwordx8 s[24:31], s[10:11], 0x0': '05060cf4000000fa',
     's_load_dwordx8 s[24:31], s[10:11], 0x20': '05060cf4200000fa',
+    's_add_u32 s10, s10, 32': '0aa00a80',
+    's_mov_b32 s11, 1': '81038bbe',
     's_waitcnt lgkmcnt(0)': '7fc08cbf',
     's_mov_b32 s19, s31': '1f0393be',
     's_mov_b32 s17, s29': '1d0391be',
@@ -983,12 +985,18 @@ def check_controls():
     refused('buffer store through a modified descriptor', lambda: translate(
         'A', code=splice(STRIDE_EXTRACT, 's_max_u32 s21, s21, 2', *RAW_CONVERSION[1:])).hlsl_cs())
     reload = ('s_load_dwordx8 s[24:31], s[10:11], 0x0', 's_waitcnt lgkmcnt(0)')
-    # A second load of the same table words reads the same descriptor, so taking a word from it is the same value.
+    other = ('s_load_dwordx8 s[24:31], s[10:11], 0x20', 's_waitcnt lgkmcnt(0)')  # the next two descriptors
+    # A second load through the same untouched pointer pair reads the same words, so a word taken from it is the
+    # same value. After s_add_u32 s10, s10, 32 the pointer symbol hides the addend, so that load is told apart.
     for lines in ((*reload, 's_mov_b32 s19, s31', *RAW_CONVERSION),
                   (*reload, STRIDE_EXTRACT, 's_mov_b32 s17, s29', clear, SCALE_RECORDS, OOB_RAW)):
         assert translate('A', code=splice(*lines)).hlsl_cs() == raw.hlsl_cs()
-    other = ('s_load_dwordx8 s[24:31], s[10:11], 0x20', 's_waitcnt lgkmcnt(0)')  # the next two descriptors
+    moved = ('s_add_u32 s10, s10, 32', *reload)
+    rehigh = ('s_mov_b32 s11, 1', *reload)  # another high address word: another descriptor
     for lines in (
+        (*rehigh, 's_bfe_u32 s21, s29, 0xe0010', clear, SCALE_RECORDS, OOB_RAW),
+        (*moved, 's_mov_b32 s19, s31', *RAW_CONVERSION),
+        (*moved, 's_bfe_u32 s21, s29, 0xe0010', clear, SCALE_RECORDS, OOB_RAW),
         (*RAW_CONVERSION[:-1], 's_or_b32 s19, s19, 0x20000000'),
         (STRIDE_EXTRACT, clear, OOB_RAW),
         (STRIDE_EXTRACT, SCALE_RECORDS, OOB_RAW),

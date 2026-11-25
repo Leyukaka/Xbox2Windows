@@ -644,7 +644,9 @@ def names_one_value(sym):
     if sym is None:
         return False
     if sym[0] == 'desc':
-        return len(sym) == 4  # ('desc', source, load offset, dword); a derived or 'modified' word names no loaded value
+        # ('desc', source, load offset, dword) and, in a compute stage, the offset of the s_load that read it: the
+        # source does not record an addend on the pointer, so only the same load proves the same words.
+        return len(sym) == 4 or (len(sym) == 5 and isinstance(sym[4], int))
     # An add on a pointer keeps its symbol and marks it 'added' (the offset is not in the tuple), so only an
     # untouched pointer, exactly (kind, source), names one value.
     return sym[0] in ('const', 'ud', 'execcopy') or (sym[0] in ('ptr', 'ptrhi') and len(sym) == 2)
@@ -693,7 +695,8 @@ def raw_descriptor_alu(base, syms, constants):
             continue
         other = 1 - i
         field = word[3] % 4
-        plain = len(word) == 4  # a loaded word; its (source, offset, dword) names one descriptor value
+        loaded = 5 if len(word) > 4 and isinstance(word[4], int) else 4  # with the compute load tag
+        plain = len(word) == loaded  # a loaded word of one s_load
         if plain and field == 1:
             if base == 's_and_b32' and constants[other] == 0xc000ffff:
                 return word + ('stride0',)
@@ -705,8 +708,8 @@ def raw_descriptor_alu(base, syms, constants):
         if field == 3:
             if plain and base == 's_and_b32' and constants[other] == 0xcfffffff:
                 return word + ('oob0',)
-            if (plain or word[4:] == ('oob0',)) and base == 's_or_b32' and constants[other] == 0x30000000:
-                return word[:4] + ('oob3',)
+            if (plain or word[loaded:] == ('oob0',)) and base == 's_or_b32' and constants[other] == 0x30000000:
+                return word[:loaded] + ('oob3',)
     return None
 
 
@@ -3320,8 +3323,20 @@ class Stage:
                 for i in range(count):
                     self.set_s(dst[1] + i, '%s.Load(%d)' % (buf, off + 4 * i))
                 return
+            # The pointer symbol does not record an addend or a rewritten high word, so two loads through such a
+            # pointer may read different words under the same (source, offset). In a compute stage those loads
+            # are told apart by the offset of the s_load; loads through the untouched pair keep one identity.
+            # A 32-bit table pointer carries a high word the program sets to a constant: loads through the same
+            # untouched low word and the same constant read the same words (tag -1 - constant).
+            hi = self.sym.get(base[1] + 1)
+            if getattr(self, 'kind', None) != 'cs' or (p == ('ptr', p[1]) and hi == ('ptrhi', p[1])):
+                load = ()
+            elif p == ('ptr', p[1]) and hi and hi[0] == 'const' and len(hi) == 2:
+                load = (-1 - hi[1],)
+            else:
+                load = (self.pc,)
             for i in range(count):
-                self.sym[dst[1] + i] = ('desc', p[1], off, i)
+                self.sym[dst[1] + i] = ('desc', p[1], off, i) + load
             return
         if p[1] == ('smpheap',):
             if self.pipe.sampler_heap and count == 4:
