@@ -353,7 +353,7 @@ Translation* cached_translation(const void* a, std::size_t a_bytes, const void* 
 {
     // Keep pre-fix desktop bytecode and manifests out of this ABI's cache.
     // tools/startup/gfx2hlsl.py hashes the same bytes, without a trailing NUL.
-    constexpr char revision[] = "x2w-startup-shader-17";
+    constexpr char revision[] = "x2w-startup-shader-18";
     const u64 seed = fnv_bytes(revision, sizeof(revision) - 1);
     u64 key = fnv_bytes(root_blob.data(), root_blob.size(), fnv_bytes(b, b_bytes, fnv_bytes(a, a_bytes, seed)));
     // A stream's input layout (stream_input_layout) feeds the vertex fetch, so it is part of the key.
@@ -474,7 +474,7 @@ u64 publish_compute_request(const void* desc)
     std::vector<unsigned char> fields(sizeof(words));
     words[0] = words[1] = words[3] = words[5] = words[7] = words[9] = words[10] = 0;
     std::memcpy(fields.data(), words, sizeof(words));
-    constexpr char compute_revision[] = "x2w-startup-shader-17cs";  // tools/startup/gfx2hlsl.py compute_key
+    constexpr char compute_revision[] = "x2w-startup-shader-18cs";  // tools/startup/gfx2hlsl.py compute_key
     u64 key = fnv_bytes(compute_revision, sizeof(compute_revision) - 1);
     const std::vector<unsigned char>* order[] = {&code, &data, &root_blob, &fields, &state_a, &state_b};
     for (const auto* part : order) key = fnv_part(*part, key);
@@ -538,7 +538,7 @@ void request_slot57_mesh(Wrapper* pipeline, const std::vector<RootParameter>* bo
         return copy_title_bytes(out.data(), pointer, out.size());
     };
     if (!copy_stage(13, true, mesh) || !copy_stage(5, false, pixel)) return;
-    constexpr char revision[] = "x2w-startup-mesh-57-2";
+    constexpr char revision[] = "x2w-startup-mesh-57-3";
     const u64 key = fnv_part(root_blob, fnv_part(pixel, fnv_part(mesh, fnv_bytes(revision, sizeof(revision) - 1))));
     static SRWLOCK request_lock = SRWLOCK_INIT;
     static std::unordered_set<u64> written;
@@ -1691,6 +1691,7 @@ constexpr const char* sampled_texture_unbindable = "sampled_texture_unbindable";
 constexpr const char* incomplete_vertex_stream = "incomplete_vertex_stream";
 constexpr const char* incomplete_table_buffer = "incomplete_table_buffer";
 constexpr const char* indexed_validation_failed = "indexed_validation_failed";
+constexpr const char* read_only_depth_write = "read_only_depth_write";
 }  // namespace indirect_refusal_code
 
 struct TranslatedIndirectDraw {
@@ -1841,14 +1842,7 @@ ID3D12Resource* validate_indexed_arguments(Wrapper* self, ID3D12GraphicsCommandL
 
     // The clamp changes the native compute root and invalidates its arguments.
     // In render mode slot 43 is the forwarded compute parameter setter.
-    const auto& pass = pass_of(self);
-    if (pass.desktop_compute_root) {
-        list->SetComputeRootSignature(pass.desktop_compute_root.Get());
-        for (UINT parameter = 0; parameter < pass.desktop_compute_upload_srvs.size(); ++parameter) {
-            const auto address = pass.desktop_compute_upload_srvs[parameter];
-            if (address) list->SetComputeRootShaderResourceView(parameter, address);
-        }
-    }
+    restore_compute_root(pass_of(self), list);
     return scratch.Get();
 }
 
@@ -2141,6 +2135,14 @@ bool draw_translated(Wrapper* self, bool indexed, UINT count, UINT instances, UI
             ReleaseSRWLockExclusive(&draw_lock);
             return false;
         }
+        if (bound->has_depth_stencil && pass.dsv_format != DXGI_FORMAT_UNKNOWN && !pass.depth_view_writable &&
+            ((bound->depth_stencil.DepthEnable && bound->depth_stencil.DepthWriteMask != D3D12_DEPTH_WRITE_MASK_ZERO) ||
+             (bound->depth_stencil.StencilEnable && bound->depth_stencil.StencilWriteMask != 0))) {
+            indirect->set_refusal("translated draw writes depth or stencil to a read-only depth view",
+                                  indirect_refusal_code::read_only_depth_write);
+            ReleaseSRWLockExclusive(&draw_lock);
+            return false;
+        }
     }
     ID3D12PipelineState* pipeline = ensure_draw_heap(self->own().list_device) ? pipeline_for(*bound, *tr, pass, indexed_rect) : nullptr;
     if (indirect && indexed_rect && !pipeline) {
@@ -2171,12 +2173,34 @@ bool draw_translated(Wrapper* self, bool indexed, UINT count, UINT instances, UI
     // The shader adds the "base vertex" entry value to the vertex index, so that value is biased by
     // -vertex_first and each stream's view starts at vertex_first.
     const UINT index_bytes = pass.ib.Format == DXGI_FORMAT_R16_UINT ? 2 : 4;
-    const u64 index_address = pass.ib.BufferLocation + u64{start} * index_bytes;
+    const u64 index_start = u64{start} * index_bytes;
+    const u64 index_address = pass.ib.BufferLocation + index_start;
     const std::size_t index_total = std::size_t{count} * index_bytes;
     const bool indices_ok = indexed && !indirect && pass.ib.BufferLocation && readable_window(index_address, index_total) >= index_total;
+    D3D12_INDEX_BUFFER_VIEW live_indices{};
+    ID3D12Resource* live_index_resource = nullptr;
+    // A vertex-stream SRV uses the recording-time index scan to size and rebase its view.
+    // For other draws, a live alias lets IA observe legal CPU writes made before submission.
+    if (indices_ok && index_total && index_address >= pass.ib.BufferLocation &&
+        (pass.ib.Format == DXGI_FORMAT_R16_UINT || pass.ib.Format == DXGI_FORMAT_R32_UINT) &&
+        index_address % index_bytes == 0 && index_start <= pass.ib.SizeInBytes &&
+        index_total <= pass.ib.SizeInBytes - index_start &&
+        std::none_of(tr->srvs.begin(), tr->srvs.end(), [](const Translation::Srv& srv) { return srv.source == 1; })) {
+        const auto placed = placed_buffer_range(self->own().list_device, index_address, index_total);
+        if (!placed.reject && placed.alias && InterlockedCompareExchange(&placed.owner->own().refs, 0, 0)) {
+            const auto base = reinterpret_cast<u64>(placed.owner->own().title_memory);
+            const auto offset = index_address - base;
+            const auto gpu = placed.alias->GetGPUVirtualAddress();
+            if (gpu && offset <= ~u64{} - gpu && (gpu + offset) % index_bytes == 0 &&
+                retain_with_recording(self, x2w_startup::ComPtr<ID3D12Resource>(placed.alias))) {
+                live_indices = {gpu + offset, static_cast<UINT>(index_total), pass.ib.Format};
+                live_index_resource = placed.alias;
+            }
+        }
+    }
     INT vertex_first = indexed ? 0 : static_cast<INT>(start);
     UINT vertex_count = indexed ? 0 : count;
-    if (indices_ok) {
+    if (indices_ok && !live_index_resource) {
         std::uint32_t low = ~0u, high = 0;
         for (UINT k = 0; k < count; ++k) {
             const std::uint32_t value = index_bytes == 2 ? reinterpret_cast<const std::uint16_t*>(index_address)[k]
@@ -2266,7 +2290,13 @@ bool draw_translated(Wrapper* self, bool indexed, UINT count, UINT instances, UI
                     if (srv.kind == 2) desc.Texture2DArray.ArraySize = 1;
                 }
             }
-            if (indirect && (!texture || record.slot != 18 || texture == pass.target0)) {
+            const auto aliases_writable_target = [&](ID3D12Resource* tex) {
+                if (!tex) return false;
+                for (UINT t = 0; t < pass.target_count; ++t)
+                    if (pass.bound_targets[t] == tex) return true;
+                return pass.bound_depth == tex && pass.depth_view_writable;
+            };
+            if (indirect && (!texture || record.slot != 18 || aliases_writable_target(texture))) {
                 indirect->set_refusal("translated draw requires a matching sampled texture distinct from the target",
                                       indirect_refusal_code::sampled_texture_mismatch);
                 ReleaseSRWLockExclusive(&draw_lock);
@@ -2538,11 +2568,14 @@ bool draw_translated(Wrapper* self, bool indexed, UINT count, UINT instances, UI
         drawn = true;
     } else if (indexed) {
         u64 offset = 0;
-        const u64 address = index_address;
-        const std::size_t bytes = index_total;
-        if (indices_ok && frame_copy(address, bytes, &offset)) {
-            const D3D12_INDEX_BUFFER_VIEW view{upload_ring->GetGPUVirtualAddress() + offset, static_cast<UINT>(bytes),
-                                               index_bytes == 2 ? DXGI_FORMAT_R16_UINT : DXGI_FORMAT_R32_UINT};
+        auto view = live_indices;
+        if (live_index_resource) {
+            require_state(self, live_index_resource, D3D12_RESOURCE_STATE_INDEX_BUFFER);
+        } else if (indices_ok && frame_copy(index_address, index_total, &offset)) {
+            view = {upload_ring->GetGPUVirtualAddress() + offset, static_cast<UINT>(index_total),
+                    index_bytes == 2 ? DXGI_FORMAT_R16_UINT : DXGI_FORMAT_R32_UINT};
+        }
+        if (view.BufferLocation) {
             list->IASetIndexBuffer(&view);
             const auto red_samples = red_producer_draw_before(self, list, "translated-draw", tr->key);
             list->DrawIndexedInstanced(count, instances ? instances : 1, 0, 0, start_instance);
