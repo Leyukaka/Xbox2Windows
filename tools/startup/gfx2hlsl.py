@@ -1389,7 +1389,7 @@ MESH_VCC_BRANCHES = ('s_cbranch_vccz', 's_cbranch_vccnz')
 VCC_KEYS = {'vcc', 'vcc_hi'}
 
 
-def mesh_skeleton(ins, vcc_branches, wave_limits):
+def mesh_skeleton(ins, vcc_branches, wave_limits, wave_loads):
     """Prove the one accepted group-memory shape of a slot 57 mesh program and replace it by per-thread instructions.
 
     Accepted shape, in program order (anything else is refused with its own message):
@@ -1516,6 +1516,33 @@ def mesh_skeleton(ins, vcc_branches, wave_limits):
         raise Unsupported(exchange_branch_refusal)
     first_post_count_branch = next((i for i in edges if i >= b_end), None)
     shift_branch = None
+    load_compare = None
+    execz_effects = 'slot 57 mesh: s_cbranch_execz skips code with effects outside active lanes'
+
+    def live_at_join(reg, join):
+        pending, seen = [join], set()
+        while pending:
+            i = pending.pop()
+            if i >= len(ins) or i in seen:
+                continue
+            seen.add(i)
+            if i == count_at:
+                if reg in (env['prims'], env['verts']):
+                    return True
+                if reg != env['b_tmp']:
+                    pending.append(b_end)
+                continue
+            name, asm = ins[i][2:]
+            reads, writes, _ = scalar_effects(name, asm)
+            if reg in reads:
+                return True
+            if reg not in writes:
+                if i in edges:
+                    pending.append(edges[i])
+                if name not in ('s_branch', 's_endpgm'):
+                    pending.append(i + 1)
+        return False
+
     for source, target in edges.items():
         if ins[source][2] == 's_cbranch_execz':
             # A single scalar shift followed by a full EXEC restore has a separate wave-level proof below.
@@ -1523,6 +1550,24 @@ def mesh_skeleton(ins, vcc_branches, wave_limits):
                     and ins[source + 1][2] == 's_lshl_b32' and ins[target][3] == 's_mov_b64 exec, -1'):
                 shift_branch = source
                 continue
+            if a_end <= source < target < count_at and load_compare is None:
+                loads = [i for i in range(source + 1, target) if ins[i][2] == 's_buffer_load_dword']
+                if len(loads) == 1:
+                    load = loads[0]
+                    compare = source - 1
+                    while compare > a_end and not writes_exec(ins[compare][2], parse(ins[compare][3])[1]):
+                        compare -= 1
+                    match = re.fullmatch(r'v_cmpx_gt_u32_e32 (s\d+), v(\d+)', ins[compare][3])
+                    dst = parse(ins[load][3])[1][0]
+                    if (compare <= a_end or ins[compare - 1][3] != 's_mov_b64 exec, -1' or not match
+                            or targets.intersection(range(compare, target))
+                            or any(i != load and not (no_effect(i) or lane_only(i))
+                                   for i in range(source + 1, target))
+                            or not re.fullmatch(r's\d+', dst) or not live_at_join(dst, target)):
+                        raise Unsupported(exchange_branch_refusal if target == count_at else execz_effects)
+                    load_compare, load_bound, load_thread = compare, match[1], int(match[2])
+                    wave_loads[ins[source][0]] = (ins[compare][0], load_bound, ins[load][0], dst)
+                    continue
             # The model skips per lane, while the guest skips per wave. The difference is invisible when
             # lanes with clear EXEC can only bypass predicated writes before the paths meet. A skipped
             # s_branch may land at the execz target or past it over instructions without effect (the
@@ -1533,7 +1578,7 @@ def mesh_skeleton(ins, vcc_branches, wave_limits):
                         or (name == 's_branch' and edges[i] >= target
                             and all(no_effect(k) for k in range(target, edges[i])))
                         or lane_only(i) or (source == count_entry_branch and dead_count_entry_scalar(i))):
-                    raise Unsupported('slot 57 mesh: s_cbranch_execz skips code with effects outside active lanes')
+                    raise Unsupported(execz_effects)
         elif any(ins[i][2] == 'exp' for i in range(source + 1, target)):
             raise Unsupported('slot 57 mesh: a branch bypasses an export')
 
@@ -1684,6 +1729,10 @@ def mesh_skeleton(ins, vcc_branches, wave_limits):
             if mask is not None or mesh_vregs(ops) & stale:
                 raise Unsupported(exchange_branch_refusal)
             mask = 'count_entry'
+        elif index == load_compare:
+            if mask is not None or thread != load_thread or load_thread in stale:
+                raise Unsupported(execz_effects)
+            mask = 'wave_load'
         elif base_name.startswith('v_cmpx'):
             count = {env['verts']: 'verts', env['prims']: 'prims'}.get(ops[0] if ops else None)
             if (base_name != 'v_cmpx_gt_i32' or not after or mask is not None or count is None
@@ -1769,7 +1818,8 @@ class Stage:
         if kind == 'ms':
             self.mesh_vcc_branches = {}
             self.mesh_wave_limits = {}
-            self.ins = mesh_skeleton(self.ins, self.mesh_vcc_branches, self.mesh_wave_limits)
+            self.mesh_wave_loads = {}
+            self.ins = mesh_skeleton(self.ins, self.mesh_vcc_branches, self.mesh_wave_limits, self.mesh_wave_loads)
         # A loop header is translated before the back edges into it, so whether a back edge brings the symbol kept
         # there is known only afterwards: translate again with that register read at run time or refused there. A
         # register only moves from kept to 'run' to 'refuse', so this ends.
@@ -2525,6 +2575,10 @@ class Stage:
         refusals = getattr(self, 'refusals', None)  # unit probes build a Stage without __init__
         vcc_branches = getattr(self, 'mesh_vcc_branches', {})
         wave_limits = getattr(self, 'mesh_wave_limits', {})
+        wave_loads = getattr(self, 'mesh_wave_loads', {})
+        wave_load_compares = {compare: bound for compare, bound, _, _ in wave_loads.values()}
+        wave_load_sites = {load for _, _, load, _ in wave_loads.values()}
+        execz_effects = 'slot 57 mesh: s_cbranch_execz skips code with effects outside active lanes'
         vcc_compares = set().union(*vcc_branches.values())
         try:
             self.calculated_pc = calculated_pc_proof(self.ins, getattr(self, 'kind', None))
@@ -2736,6 +2790,17 @@ class Stage:
                     if off in refused:
                         raise Unsupported(refused[off])
                     base = re.sub(r'_e(32|64)$', '', name)
+                    if off in wave_load_compares:
+                        bound = wave_load_compares[off]
+                        if not self.uniform_source(bound) or int(bound[1:]) not in self.defined_uniform_s:
+                            raise Unsupported(execz_effects)
+                        # Capture the bound at the compare, before any intervening SGPR write.
+                        self.emit('wave_any = (tid & ~63u) < %s;' % self.u(bound))
+                    if off in wave_load_sites:
+                        offset = smem_offset(parse(asm)[1][2])
+                        if not self.uniform_source(offset) or (
+                                re.fullmatch(r's\d+', offset) and int(offset[1:]) not in self.defined_uniform_s):
+                            raise Unsupported(execz_effects)
                     if off in vcc_compares and all(
                         not mesh_vregs([tok]) and self.uniform_source(tok)
                         for tok in parse(asm)[1][1:]
@@ -2743,7 +2808,13 @@ class Stage:
                         uniform_vcc_compares.add(off)
                     if base.startswith('s_cbranch_'):
                         cond = base[10:]
-                        cond_uniform = (cond in ('scc0', 'scc1') and self.scc_uniform) or off in wave_limits
+                        if off in wave_loads:
+                            dst = wave_loads[off][3]
+                            if not self.uniform_source(dst) or int(dst[1:]) not in self.defined_uniform_s:
+                                raise Unsupported(execz_effects)
+                            self.u(dst)  # declare the variable; refuses a symbol with no run-time value
+                        cond_uniform = ((cond in ('scc0', 'scc1') and self.scc_uniform)
+                                        or off in wave_limits or off in wave_loads)
                         if off in vcc_branches:
                             if not vcc_branches[off] <= uniform_vcc_compares:
                                 raise Unsupported('slot 57 mesh: %s on a wave-wide condition is not covered' % name)
@@ -2759,6 +2830,8 @@ class Stage:
                     term = self.one(name, asm)
                     if off in wave_limits:
                         term = ('branch', '(tid & ~63u) >= %du' % wave_limits[off], term[2])
+                    if off in wave_loads:
+                        term = ('branch', '!wave_any', term[2])
                 except Unsupported as reason:
                     if refusals is None:
                         if not hasattr(reason, 'instruction'):
@@ -6710,13 +6783,15 @@ class Stage:
                 raise Unsupported('branch into the middle of a block (+0x%x)' % off)
             return index[off]
         out.append('    uint pc = 0;')
+        wave_load_blocks = {off + n for off, n, _, _ in self.ins if off in getattr(self, 'mesh_wave_loads', {})}
         if loops:
             out.append('    [loop] for (uint guard = 0; guard < 65536 && pc != 0xffffu; ++guard) {')
         for i, (off, lines, term) in enumerate(self.blocks):
             if off == getattr(self, 'mesh_allocation_block', None):
                 out.append('    {')
             else:
-                out.append('    %sif (pc == %d) {' % ('else ' if loops and i else '', i))
+                attribute = '[branch] ' if off in wave_load_blocks else ''
+                out.append('    %s%sif (pc == %d) {' % ('else ' if loops and i else '', attribute, i))
             out += ['        ' + line for line in lines]
             nxt = i + 1 if i + 1 < len(self.blocks) else 0xffff
             if not term:
@@ -6744,6 +6819,8 @@ class Stage:
         if getattr(self, 'spill_slots', None):
             lines.append('    uint %s;' % ', '.join('sp%d_%d = 0' % k for k in sorted(self.spill_slots)))
         lines.append('    uint vcc = 0, exec = 1, m0 = 0, a = 0, w = 0; bool scc = false; float4 t = 0;')
+        if getattr(self, 'mesh_wave_loads', {}):
+            lines.append('    bool wave_any = false;')
         if getattr(self, 'used_atomic', None):
             if 'uint' in self.used_atomic:
                 lines.append('    uint ao = 0;')
