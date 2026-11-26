@@ -273,6 +273,7 @@ python3 -m venv out/pe-env
 ./out/pe-env/bin/python -B tests/startup_gfx2hlsl_scalar_brev_fold_check.py
 ./out/pe-env/bin/python -B tests/startup_gfx2hlsl_const_copy_join_check.py
 ./out/pe-env/bin/python -B tests/startup_gfx2hlsl_pack_b32_f16_check.py
+./out/pe-env/bin/python -B tests/startup_gfx2hlsl_pk_minmax_check.py
 ./out/pe-env/bin/python -B tests/run_checks_parallel_check.py
 ./out/pe-env/bin/python -B tests/startup_gfx2hlsl_handler_arity_check.py
 ./out/pe-env/bin/python -B tests/startup_gfx2hlsl_getpc_refusal_check.py

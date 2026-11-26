@@ -8829,13 +8829,13 @@ class Stage:
     def op_v_fma_mixhi_f16(self, ops, mods):
         self.mix(ops, mods, 'hi')
 
-    def packed_half(self, base, arity, text, ops, mods):
-        """v_pk_{mul,add,fma}_f16: the same binary16 operation on two lanes of a VGPR pair of halves.
+    def packed_half(self, base, arity, text, ops, mods, *, select_bits=False):
+        """Apply the same binary16 operation to each of two selected halves.
 
         Result low half = op(source i half op_sel[i], ...); high half = op(source i half op_sel_hi[i], ...). Absent
         modifiers mean op_sel [0,0,0] and op_sel_hi [1,1,1] (LLVM VOP3P defaults). Both lanes are written (no zeroing).
-        Not modelled, so refused: neg_lo, neg_hi, clamp, any other modifier, and a source that is not a plain VGPR
-        (an inline constant or a literal reaches the high lane in a way that is not proven; hold it in a VGPR first).
+        Add, mul and fma require plain VGPRs. Min and max also accept numeric SGPRs, 32-bit hex literals and inline 0,
+        and select a result by its encoding. All forms refuse neg_lo, neg_hi, clamp and other modifiers.
         """
         if len(ops) != arity + 1:
             raise Unsupported('%s with %d operands, expected %d' % (base, len(ops), arity + 1))
@@ -8848,17 +8848,32 @@ class Stage:
             if len(bits) != arity or any(b not in ('0', '1') for b in bits):
                 raise Unsupported('%s with %s' % (base, m))
             sel[key] = [int(b) for b in bits]
-        for tok in ops:
+        for i, tok in enumerate(ops):
             r = reg_range(tok)
+            if select_bits and i:
+                if re.fullmatch(r'0x[0-9a-f]{1,8}|0', tok):
+                    continue
+                if r and tok == '%s%d' % (r[0], r[1]) and r[1] <= (255 if r[0] == 'v' else 105):
+                    continue
+                raise Unsupported('%s source %s requires a single VGPR, numeric SGPR, hex word or inline 0'
+                                  % (base, tok))
             if not r or r[0] != 'v' or r[1] != r[2] or tok != 'v%d' % r[1]:
                 raise Unsupported('%s operand %s is not a single VGPR' % (base, tok))
+            if select_bits and r[1] > 255:
+                raise Unsupported('%s destination %s is out of range' % (base, tok))
         lanes = []
         for picks in (sel['op_sel'], sel['op_sel_hi']):
             args = []
             for tok, hi, both in zip(ops[1:], picks, zip(sel['op_sel'], sel['op_sel_hi'])):
-                word = self.u(tok, low16_only=not any(both))
-                args.append('f16tof32(%s)' % ('(%s >> 16) & 0xffffu' % word if hi else '%s & 0xffffu' % word))
-            lanes.append('f16rn(%s)' % text.format(*args))
+                if select_bits and tok.startswith('s'):
+                    self.reject_lane_mask_data(base, tok)
+                    word = self.S(int(tok[1:]))
+                else:
+                    word = self.u(tok, low16_only=not any(both))
+                half = '(%s >> 16) & 0xffffu' % word if hi else '%s & 0xffffu' % word
+                args.append(half if select_bits else 'f16tof32(%s)' % half)
+            expr = text.format(*args)
+            lanes.append(expr if select_bits else 'f16rn(%s)' % expr)
         d = reg_range(ops[0])[1]
         self.set_v(d, '%s | (%s << 16)' % tuple(lanes))
 
@@ -8870,6 +8885,12 @@ class Stage:
 
     def op_v_pk_fma_f16(self, ops, mods):
         self.packed_half('v_pk_fma_f16', 3, 'fma16o({0}, {1}, {2})', ops, mods)
+
+    def op_v_pk_max_f16(self, ops, mods):
+        self.packed_half('v_pk_max_f16', 2, 'minmax16_bits({0}, {1}, true)', ops, mods, select_bits=True)
+
+    def op_v_pk_min_f16(self, ops, mods):
+        self.packed_half('v_pk_min_f16', 2, 'minmax16_bits({0}, {1}, false)', ops, mods, select_bits=True)
 
     def cube(self, kind, ops, mods):
         """v_cube{id,sc,tc,ma}_f32: LLVM's ConstantFoldAMDGCNCubeIntrinsic.
@@ -10351,6 +10372,17 @@ class Pipeline:
                '    return top > 0x7f800000u',
                '        ? minmax_zero32(minmax_zero32(a, b, false), c, false)',
                '        : minmax_zero32(minmax_zero32(a, b, false), minmax_zero32(minmax_zero32(a, b, true), c, false), true);',
+               '}',
+               'uint minmax16_bits(uint a, uint b, bool maximum) {',
+               '    bool a_nan = (a & 0x7fffu) > 0x7c00u;',
+               '    bool b_nan = (b & 0x7fffu) > 0x7c00u;',
+               # Two NaNs produce a canonical quiet NaN. This payload choice is not hardware-proven.
+               '    if (a_nan) return b_nan ? 0x7e00u : b;',
+               '    if (b_nan) return a;',
+               # Reverse negative encodings and put positives above them, ordering -0 below +0.
+               '    uint a_key = a ^ ((a & 0x8000u) != 0u ? 0xffffu : 0x8000u);',
+               '    uint b_key = b ^ ((b & 0x8000u) != 0u ? 0xffffu : 0x8000u);',
+               '    return (maximum ? a_key > b_key : a_key < b_key) ? a : b;',
                '}',
                # High half of an unsigned 32x32 product, by halfword products so it fits 32-bit HLSL.
                'uint mul_hi_u32(uint a, uint b) { uint la = a & 0xffffu, lb = b & 0xffffu;'
