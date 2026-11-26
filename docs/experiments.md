@@ -21,6 +21,12 @@ The compute fixture checks arithmetic, lane selection and disabled sources.
 Lane reads may refill `vcc_lo` and, in wave32, `vcc_hi` as ordinary scalar data.
 [Experiment and reproduction commands](experiments/native-lane-access-compute.md)
 
+## 64-bit scalar operations in direct compute
+
+`s_bfm_b64`, `s_cselect_b64` and `s_not_b64` lower to two scalar words.
+The compute fixture reads both result words and SCC from two workgroups.
+[Experiment and reproduction commands](experiments/native-salu64-ops.md)
+
 ## Guest row mirrors and masked branches in the direct DXIL frontend
 
 The hardware fixture gives each guest lane a distinct value. DPP16 control

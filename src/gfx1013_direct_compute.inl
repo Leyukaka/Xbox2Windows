@@ -1185,7 +1185,8 @@ struct DirectCompute {
             for (size_t j = 0; j < program.code.size(); ++j) {
                 const auto &inst = program.code[j];
                 const auto n = inst.name;
-                const bool explicit_read = std::find(inst.src.begin(), inst.src.end(), 253u) != inst.src.end();
+                const bool reads_scc = n == "s_cselect_b32" || n == "s_cselect_b64" ||
+                    std::find(inst.src.begin(), inst.src.end(), 253u) != inst.src.end();
                 // These scalar mask operations set SCC from their entire
                 // result and do not consume the incoming SCC. An explicit
                 // SRC_SCC operand still takes precedence below.
@@ -1199,12 +1200,12 @@ struct DirectCompute {
                     n == "s_nor_b32" || n == "s_nand_b32" || n == "s_xnor_b32" || n == "s_not_b32" ||
                     n == "s_lshr_b32" || n == "s_lshl_b32" || n == "s_ashr_i32" || n == "s_xor_b32";
                 const bool preserves_pair = n == "s_mul_i32" || n == "s_mul_hi_i32" || n == "s_mul_hi_u32" ||
-                    n == "s_bfm_b32" || n == "s_pack_ll_b32_b16" || n == "s_pack_lh_b32_b16" ||
+                    n == "s_bfm_b32" || n == "s_bfm_b64" || n == "s_pack_ll_b32_b16" || n == "s_pack_lh_b32_b16" ||
                     n == "s_pack_hh_b32_b16";
                 const bool uncertain_scalar = (inst.enc == Encoding::Sopk && n != "s_movk_i32") ||
                     (inst.enc == Encoding::Sop2 && !overwrites && !preserves_pair) ||
                     (inst.enc == Encoding::Sop1 && !overwrites && n != "s_mov_b32" && n != "s_mov_b64");
-                if (explicit_read || uncertain_scalar || (inst.branch() && (inst.op == 4 || inst.op == 5))) {
+                if (reads_scc || uncertain_scalar || (inst.branch() && (inst.op == 4 || inst.op == 5))) {
                     scc_live[j] = true;
                     pending.push_back(j);
                     continue;
@@ -1470,6 +1471,47 @@ struct DirectCompute {
                 write(128, ir.value("zext i1 " + cmp("ne", stride, "0") + " to i32"));
                 return;
             }
+        }
+        if (compute && n == "s_bfm_b64") {
+            if ((i.dst & 1) || i.dst > 104)
+                refuse(i.pc, "invalid s_bfm_b64 destination");
+            if ((i.src[0] > 105 && !constant32(i, i.src[0])) ||
+                (i.src[1] > 105 && !constant32(i, i.src[1])))
+                refuse(i.pc, "invalid s_bfm_b64 source");
+            auto width = ir.binary("and", val(0), "63");
+            auto offset = ir.binary("and", val(1), "63");
+            auto wide_width = ir.value("zext i32 " + width + " to i64");
+            auto wide_offset = ir.value("zext i32 " + offset + " to i64");
+            // Width and offset are six-bit fields, so both shifts stay below 64 and a raw
+            // width of 64 is an empty mask.
+            auto mask = ir.value("sub i64 " + ir.value("shl i64 1, " + wide_width) + ", 1");
+            auto bits = ir.value("shl i64 " + mask + ", " + wide_offset);
+            write(i.dst, ir.value("trunc i64 " + bits + " to i32"));
+            write(i.dst + 1, ir.value("trunc i64 " + ir.value("lshr i64 " + bits + ", 32") + " to i32"));
+            ir.features |= 1048576;
+            return;
+        }
+        if (compute && (n == "s_cselect_b64" || n == "s_not_b64")) {
+            if ((i.dst & 1) || (i.dst > 104 && i.dst != 106))
+                refuse(i.pc, "invalid " + string(n) + " destination");
+            auto high = [&](unsigned src) {
+                if (src == 106 || src == 126)
+                    refuse(i.pc, "invalid " + string(n) + " source");
+                return pair_high(i, src);
+            };
+            auto lo = val(0), hi = high(i.src[0]);
+            if (n == "s_cselect_b64") {
+                auto condition = cmp("ne", read(128), "0");
+                lo = select(condition, lo, val(1));
+                hi = select(condition, hi, high(i.src[1]));
+            } else {
+                lo = ir.binary("xor", lo, "4294967295");
+                hi = ir.binary("xor", hi, "4294967295");
+                write(128, ir.value("zext i1 " + cmp("ne", ir.binary("or", lo, hi), "0") + " to i32"));
+            }
+            write(i.dst, lo);
+            write(i.dst + 1, hi);
+            return;
         }
         auto a = val(0);
         string b, z;

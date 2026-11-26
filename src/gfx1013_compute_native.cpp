@@ -493,6 +493,16 @@ State transfer(const Inst &i, State s, bool wave64, bool graphics) {
         if (a.type == Symbol::Type::constant && b.type == Symbol::Type::constant)
             out = {Symbol::Type::constant,i.name=="s_and_b32" ? a.value & b.value : a.value << (b.value & 31)};
         set(i.dst, out);
+    } else if (!graphics && i.name == "s_bfm_b64") {
+        auto a = source(i, i.src[0], s), b = source(i, i.src[1], s);
+        Symbol lo{}, hi{};
+        if (a.type == Symbol::Type::constant && b.type == a.type) {
+            const auto mask = ((uint64_t{1} << (a.value & 63)) - 1) << (b.value & 63);
+            lo = {a.type, Word(mask)};
+            hi = {a.type, Word(mask >> 32)};
+        }
+        set(i.dst, lo);
+        set(i.dst + 1, hi);
     } else if (i.name == "s_bfm_b32") {
         auto a = source(i, i.src[0], s), b = source(i, i.src[1], s);
         Symbol v{};
