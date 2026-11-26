@@ -7498,10 +7498,10 @@ class Stage:
         return self.descriptor(operand)
 
     def op_image_store(self, ops, mods):
-        """Write a full 2D texel or, for compute, a full 2D-array texel.
+        """Write a full texel to a 2D or 2D-array image, or to a 1D or 3D compute image.
 
         MIMG opcode 0x08 (LLVM AMDGPU MIMGInstructions.td, IMAGE_STORE via MIMG_Store): VDATA is the
-        source, VADDR the integer texel address (x, y for dim 2D, x, y, layer for dim 2D-array) and SRSRC
+        source, VADDR the integer texel address (x; x, y; x, y, z; or x, y, layer) and SRSRC
         the image descriptor; the channels selected by DMASK are written in order from consecutive VDATA
         registers. HLSL's typed UAV store writes every channel of the view, so only DMASK 0xf is exact here;
         a partial mask would need a read-modify-write and is refused. The data is stored as float4, so the
@@ -7525,9 +7525,19 @@ class Stage:
         masks = [m[6:] for m in mods if m.startswith('dmask:')]
         if len(dims) != 1 or len(masks) != 1:
             raise Unsupported('%s without exactly one dim and dmask' % name)
-        array = dims[0] == 'SQ_RSRC_IMG_2D_ARRAY'
-        if dims[0] not in ('SQ_RSRC_IMG_2D', 'SQ_RSRC_IMG_2D_ARRAY'):
-            raise Unsupported('%s on %s: only 2D images are lowered' % (name, dims[0]))
+        shapes = {
+            'SQ_RSRC_IMG_2D': ('tex2d', 2, 'x and y'),
+            'SQ_RSRC_IMG_2D_ARRAY': ('tex2da', 3, 'x, y and layer'),
+        }
+        if self.kind == 'cs':
+            shapes.update({
+                'SQ_RSRC_IMG_1D': ('tex1d', 1, 'x'),
+                'SQ_RSRC_IMG_3D': ('tex3d', 3, 'x, y and z'),
+            })
+        if dims[0] not in shapes:
+            supported = '1D, 2D, 2D-array and 3D' if self.kind == 'cs' else '2D'
+            raise Unsupported('%s on %s: only %s images are lowered' % (name, dims[0], supported))
+        kind, address, axes = shapes[dims[0]]
         try:
             mask = int(masks[0], 0)
         except ValueError:
@@ -7544,10 +7554,9 @@ class Stage:
         else:
             r = reg_range(coords)
             cs = ['v%d' % n for n in range(r[1], r[2] + 1)] if r and r[0] == 'v' else []
-        address = 3 if array else 2
         if len(cs) != address:
             raise Unsupported('%s with %d address registers: %s expected'
-                              % (name, len(cs), 'x, y and layer' if array else 'x and y'))
+                              % (name, len(cs), axes))
         words = [self.u('v%d' % n) for n in range(data[1], data[2] + 1)]
         if self.kind == 'cs':
             if not all(re.fullmatch(r'v\d+', c) and int(c[1:]) <= 255 for c in cs):
@@ -7561,8 +7570,9 @@ class Stage:
             value = 'float4(%s)' % ', '.join(rgba)
         else:
             value = 'asfloat(uint4(%s))' % ', '.join(words)
-        image = self.pipe.uav(key, 'tex2da' if array else 'tex2d')
-        index = 'uint%d(%s)' % (address, ', '.join(self.u(c) for c in cs))
+        image = self.pipe.uav(key, kind)
+        index_type = 'uint' if address == 1 else 'uint%d' % address
+        index = '%s(%s)' % (index_type, ', '.join(self.u(c) for c in cs))
         body = '%s[%s] = %s;' % (image, index, value)
         self.emit(body if self.exec_known else 'if (exec & 1) ' + body)
 
@@ -10430,7 +10440,7 @@ class Pipeline:
         for key, r in sorted(self.resources.items(), key=lambda kv: kv[1]['index']):
             out.append('%s r%d : register(t%d);' % ({'buf': 'ByteAddressBuffer', 'tex1d': 'Texture1D<float4>', 'tex2d': 'Texture2D<float4>', 'tex2da': 'Texture2DArray<float4>', 'tex3d': 'Texture3D<float4>'}[r['kind']], r['index'], r['index']))
         for key, r in sorted(self.stored_images().items(), key=lambda kv: kv[1]['index']):
-            out.append('%s %s%d : register(u%d);' % ({'tex2d': 'RWTexture2D<float4>', 'tex2da': 'RWTexture2DArray<float4>', 'raw': 'RWByteAddressBuffer'}[r['kind']], 'u' if r['kind'] == 'raw' else 'w', r['index'], r['index']))
+            out.append('%s %s%d : register(u%d);' % ({'tex1d': 'RWTexture1D<float4>', 'tex2d': 'RWTexture2D<float4>', 'tex2da': 'RWTexture2DArray<float4>', 'tex3d': 'RWTexture3D<float4>', 'raw': 'RWByteAddressBuffer'}[r['kind']], 'u' if r['kind'] == 'raw' else 'w', r['index'], r['index']))
         for key, i in self.samplers.items():
             out.append('%s q%d : register(s%d);' % ('SamplerComparisonState' if key[0] == 'cmp' else 'SamplerState', i, i))
         if self.uses_sampler_heap:
