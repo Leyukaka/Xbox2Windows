@@ -1376,12 +1376,18 @@ struct DirectCompute {
         }
         if (n == "v_lshrrev_b64" || n == "v_lshlrev_b64") {
             unsigned src = i.src[1];
-            if (i.dst >= 511 || (src < 256 && src != 128) || src == 511)
+            const bool sgpr_pair = src <= 104 && (src & 1) == 0;
+            const bool vgpr_pair = src >= 256 && src < 511;
+            const bool inline_int = src >= 128 && src <= 208;
+            if (i.dst >= 511 || !(sgpr_pair || vgpr_pair || inline_int || src == 255))
                 refuse(i.pc, "direct 64-bit shift operand");
             string lo = "0", hi = "0";
             if (src != 128) {
-                lo = read(src);
-                hi = read(src + 1);
+                lo = operand32(i, src);
+                if (sgpr_pair || vgpr_pair)
+                    hi = operand32(i, src + 1);
+                else if (inline_int && src >= 193)
+                    hi = "4294967295";
                 auto low = ir.value("zext i32 " + lo + " to i64"), high = ir.value("zext i32 " + hi + " to i64");
                 auto bits = ir.value("shl i64 " + high + ", 32");
                 bits = ir.value("or i64 " + bits + ", " + low);

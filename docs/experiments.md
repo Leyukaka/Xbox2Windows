@@ -2,6 +2,13 @@
 
 New notes go in `docs/experiments/<topic>.md` (see [the folder guide](experiments/README.md)); this file keeps the older notes.
 
+## Guest logical 64-bit shift sources in direct compute
+
+Logical 64-bit shifts accept sign-extended inline integers, zero-extended
+32-bit literals and numeric even SGPR pairs. The compute fixture checks
+both directions, boundary shift amounts and the inline-float refusal.
+[Experiment and reproduction commands](experiments/native-shift64-sources.md)
+
 ## Guest quad permutations in direct compute
 
 DPP16 quad permutations reuse the row mirror's EXEC and operand handling.
