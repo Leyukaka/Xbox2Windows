@@ -8,6 +8,12 @@ DPP16 quad permutations reuse the row mirror's EXEC and operand handling.
 The compute fixture checks arithmetic, lane selection and disabled sources.
 [Experiment and reproduction commands](experiments/native-dpp-quad-compute.md)
 
+## Guest lane reads and writes in direct compute
+
+`v_readlane_b32` and `v_writelane_b32` lower with a constant or SGPR lane; lane writes ignore EXEC.
+Lane reads may refill `vcc_lo` and, in wave32, `vcc_hi` as ordinary scalar data.
+[Experiment and reproduction commands](experiments/native-lane-access-compute.md)
+
 ## Guest row mirrors and masked branches in the direct DXIL frontend
 
 The hardware fixture gives each guest lane a distinct value. DPP16 control

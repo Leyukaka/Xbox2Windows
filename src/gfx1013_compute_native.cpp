@@ -352,7 +352,8 @@ Inst decode(const string &bytes, unsigned pc,bool direct=false, bool graphics=fa
     if (i.enc == Encoding::Vop1 && !i.op) i.name = "v_nop";
     if (i.name.empty()) {
         const char *name = mnemonic(i.enc,i.op);
-        if(!name && direct && !encoded.name.empty())name=encoded.name.data();
+        if (!name && (direct || encoded.name == "v_readlane_b32") && !encoded.name.empty())
+            name = encoded.name.data();
         if (!name)
             refuse(pc, "unsupported opcode " + hexword(a));
         i.name = name;
@@ -360,7 +361,7 @@ Inst decode(const string &bytes, unsigned pc,bool direct=false, bool graphics=fa
             i.dst = 126;
         if (i.name == "v_readfirstlane_b32" || i.name == "v_readlane_b32") {
             i.dst -= 256;
-            if (i.dst > 105)
+            if (i.dst > (graphics ? 105u : 107u))
                 refuse(pc, "invalid scalar lane read destination");
         }
     }
@@ -1011,6 +1012,10 @@ struct Emit {
     }
     void vector(const Inst &i) {
         auto n = i.name;
+        if ((n == "v_readfirstlane_b32" || n == "v_readlane_b32") && i.dst >= 106)
+            refuse(i.pc, "invalid scalar lane read destination");
+        if (n == "v_readlane_b32")
+            refuse(i.pc, "unsupported HLSL instruction v_readlane_b32");
         auto selected = [&](unsigned j) {
             require_numeric(i, i.src[j]);
             auto s = operand(i, i.src[j]);
@@ -1376,7 +1381,7 @@ static NativeComputeShader translate_program(const ComputeRequest &request, unsi
         refuse(entry, "invalid compute group shape");
     if (rsrc2 & ~0xff9fbeu || lds > 64)
         refuse(entry, "unsupported compute resource flags");
-    if (threads > 32 && threads % 32)
+    if (!direct_dxil && threads > 32 && threads % 32)
         refuse(entry, "partial final wave in multi-wave group");
     Microsoft::WRL::ComPtr<ID3D12VersionedRootSignatureDeserializer> sig;
     D3D12_VERSIONED_ROOT_SIGNATURE_DESC empty{};
@@ -1464,6 +1469,12 @@ static NativeComputeShader translate_program(const ComputeRequest &request, unsi
     if (direct_dxil) {
         DirectCompute compiler{emit};
         compiler.wave64 = wave64;
+        if (threads % (wave64 ? 64 : 32))
+            for (const auto &i : program.code)
+                if (i.name == "v_readlane_b32" || i.name == "v_writelane_b32")
+                    DirectCompute::validate_lane_shape(i, static_cast<unsigned>(threads), wave64 ? 64 : 32);
+        if (threads > 32 && threads % 32)
+            refuse(entry, "partial final wave in multi-wave group");
         if (wave64 && threads % 64) refuse(entry, "wave64 exchange requires complete guest waves");
         if (wave64 && threads > 64) {
             const auto &code = program.code;
@@ -1471,7 +1482,7 @@ static NativeComputeShader translate_program(const ComputeRequest &request, unsi
                 [](const Inst &i) { return i.branch() && i.op != 2; });
             const bool synchronizes = std::any_of(code.begin(), code.end(), [](const Inst &i) {
                 return i.enc == Encoding::Vopc || i.enc == Encoding::Lds || carry_destination(i) ||
-                       i.name == "v_readfirstlane_b32" || i.name == "s_barrier";
+                       i.name == "v_readfirstlane_b32" || i.name == "v_readlane_b32" || i.name == "s_barrier";
             });
             if (branches && synchronizes) refuse(entry, "multi-wave64 exchange requires converged group control flow");
         }

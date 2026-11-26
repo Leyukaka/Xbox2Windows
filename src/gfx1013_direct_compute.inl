@@ -1,6 +1,22 @@
 // Lower the shared decoded CFG to DXIL operations. A scalar register holds one
-// 32-bit word per wave. Vector destinations retain their old value on inactive lanes.
+// 32-bit word per wave. Ordinary vector writes retain their old value on inactive lanes.
 struct DirectCompute {
+    static constexpr Word inline_float_words[]{0x3f000000, 0xbf000000, 0x3f800000, 0xbf800000, 0x40000000,
+                                               0xc0000000, 0x40800000, 0xc0800000, 0x3e22f983};
+    static std::optional<Word> constant32(const Inst &i, unsigned r) {
+        if (r >= 128 && r <= 192) return r - 128;
+        if (r >= 193 && r <= 208) return Word(192) - r;
+        if (r >= 240 && r <= 248) return inline_float_words[r - 240];
+        if (r == 255) return i.literal;
+        return {};
+    }
+    static void validate_lane_shape(const Inst &i, unsigned threads, unsigned width) {
+        const auto constant = constant32(i, i.src[1]);
+        const auto remaining = threads % width;
+        if (((i.src[1] <= 105 || (width == 32 && i.src[1] == 107)) && threads % 32) ||
+            (constant && remaining && (*constant & (width - 1)) >= remaining))
+            refuse(i.pc, "lane read/write needs full waves");
+    }
     Emit &analysis;
     DxilModule ir;
     std::set<unsigned> allocated;
@@ -96,22 +112,14 @@ struct DirectCompute {
     string operand32(const Inst &i, unsigned n) {
         if (graphics_input && n == 106)
             refuse(i.pc, "graphics instruction consumes a full wave mask");
-        if (n <= 106 || n == 126 || n == 127 || (wave64 && n == 107) || (n >= 256 && n < 512)) {
+        if (n <= 106 || n == 126 || n == 127 || (!graphics_input && n == 107) || (n >= 256 && n < 512)) {
             analysis.require_numeric(i, n);
             return read(n);
         }
         if (n == 253)
             return read(128); // internal slot for SCC
-        if (n == 255)
-            return to_string(i.literal);
-        if (n >= 128 && n <= 192)
-            return to_string(n - 128);
-        if (n >= 193 && n <= 208)
-            return to_string(Word(192) - n);
-        constexpr Word floats[]{0x3f000000, 0xbf000000, 0x3f800000, 0xbf800000, 0x40000000,
-                                0xc0000000, 0x40800000, 0xc0800000, 0x3e22f983};
-        if (n >= 240 && n <= 248)
-            return to_string(floats[n - 240]);
+        if (auto constant = constant32(i, n))
+            return to_string(*constant);
         refuse(i.pc, "direct DXIL operand encoding");
     }
     string ballot(const string &pred) {
@@ -174,8 +182,11 @@ struct DirectCompute {
         lane = ir.invoke("i32", "waveGetLaneIndex", 111, {}, "nounwind readnone");
         lane_bit = ir.binary("shl", "1", lane);
         write(126, ballot("true"));
-        if (!wave64)
+        if (!wave64) {
             write(127, "0");
+            // s107 is ordinary scalar data in wave32; a VCC pair read sees zero until it is written.
+            write(107, "0");
+        }
         string wave = "0";
         if (threads > 32) {
             auto flat = ir.invoke("i32", "flattenedThreadIdInGroup.i32", 96, {}, "nounwind readnone");
@@ -1215,7 +1226,7 @@ struct DirectCompute {
         }
         return scc_live[program.at.at(definition.next)];
     }
-    void arithmetic(const Inst &i, const State &state, const string *permuted = nullptr) {
+    void arithmetic(const Inst &i, const State &state, const string *permuted = nullptr, bool compute = false) {
         auto n = i.name;
         if (n == "v_mad_u32_u16" || n == "v_mad_i32_i16") {
             // AMD RDNA 2 ISA, VOP3A opcodes 883/885. Only the two
@@ -1312,7 +1323,7 @@ struct DirectCompute {
             return i.subword && j < 2 ? subword(value, i.src_select[j], i.src_sext[j]) : value;
         };
         if (n == "s_mov_b32" || n == "s_mov_b64") {
-            if (i.dst > 105 && i.dst != 106 && i.dst != 126 && !(wave64 && (i.dst == 107 || i.dst == 127)))
+            if (i.dst > 106 && i.dst != 126 && !(compute && i.dst == 107) && !(wave64 && i.dst == 127))
                 refuse(i.pc, "direct scalar move destination");
             if (i.src[0] <= 105 && !state[i.src[0]].numeric()) {
                 if (i.dst > 105)
@@ -1335,7 +1346,7 @@ struct DirectCompute {
                     refuse(i.pc, "floating inline constant in 64-bit move");
                 if ((i.dst & 1) || (src < 128 && (src & 1)))
                     refuse(i.pc, "unaligned scalar pair");
-                auto hi = !wave64 && src == 106 ? "0" : pair_high(i, src);
+                auto hi = graphics_input && !wave64 && src == 106 ? "0" : pair_high(i, src);
                 write(i.dst + 1, hi);
             }
             write(i.dst, a);
@@ -1360,7 +1371,43 @@ struct DirectCompute {
             write(i.dst, to_string(Word(int16_t(i.a))));
             return;
         }
+        if (compute && (n == "v_readlane_b32" || n == "v_writelane_b32")) {
+            if (i.enc != Encoding::Vop3 || i.dpp_control || (i.a & 0x7800u) || i.src[2])
+                refuse(i.pc, "lane read/write encoding or operand modifiers");
+            const bool reading = n == "v_readlane_b32";
+            if ((reading && (i.src[0] < 256 || i.src[0] >= 512 || i.dst > 107)) ||
+                (!reading && (i.src[0] >= 256 || i.dst < 256 || i.dst >= 512)))
+                refuse(i.pc, "lane read/write register operand");
+            const unsigned width = wave64 ? 64 : 32;
+            const unsigned selector = i.src[1];
+            string selected;
+            if (selector <= 105 || (!wave64 && selector == 107)) {
+                selected = ir.binary("and", val(1), to_string(width - 1));
+            } else {
+                const auto constant = constant32(i, selector);
+                if (!constant)
+                    refuse(i.pc, "lane read/write needs a constant or SGPR lane");
+                selected = to_string(*constant & (width - 1));
+            }
+            if (reading) {
+                const auto physical = wave64 ? ir.binary("and", selected, "31") : selected;
+                auto value = ir.invoke("i32", "waveReadLaneAt.i32", 117,
+                                       {{"i32", val(0)}, {"i32", physical}}, "nounwind");
+                if (wave64) {
+                    const auto halves = exchange_halves(value);
+                    value = select(cmp("uge", selected, "32"), halves[1], halves[0]);
+                }
+                write(i.dst, value);
+            } else {
+                const auto guest_lane = wave64 ? ir.binary("or", lane, select(upper_half, "32", "0")) : lane;
+                // The lane selector is the sole write predicate, independent of guest EXEC.
+                write(i.dst, select(cmp("eq", guest_lane, selected), val(0), read(i.dst)));
+            }
+            return;
+        }
         if (n == "v_readfirstlane_b32") {
+            if (compute && (i.dpp_control || (i.wide && (i.a & 0x7800u))))
+                refuse(i.pc, "readfirstlane modifiers");
             // Guest EXEC selects the first lane, even if it is not physical lane zero.
             auto low = read(126);
             auto mask = wave64 ? select(upper_half, read(127), low) : low;
@@ -1568,9 +1615,11 @@ struct DirectCompute {
             }
             return;
         }
-        if (n == "v_cndmask_b32")
+        if (n == "v_cndmask_b32") {
+            if (!wave64 && i.src[2] == 107)
+                refuse(i.pc, "unsupported wave32 conditional mask source");
             z = select(cmp("ne", ir.binary("and", wave64 ? select(upper_half, pair_high(i, i.src[2]), val(2)) : val(2), lane_bit), "0"), b, a);
-        else if (n == "v_mov_b32")
+        } else if (n == "v_mov_b32")
             z = a;
         else if (n == "s_mul_i32" || n == "v_mul_lo_u32" || n == "v_mul_lo_i32")
             z = ir.binary("mul", a, b);
@@ -1805,7 +1854,7 @@ struct DirectCompute {
             else if (i.enc == Encoding::Image)
                 image_io(i, p.before[k]);
             else
-                arithmetic(i, p.before[k]);
+                arithmetic(i, p.before[k], nullptr, true);
         }
         auto &r = analysis.result;
         r.instruction_count = unsigned(p.code.size());
