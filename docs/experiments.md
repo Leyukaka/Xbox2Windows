@@ -9479,16 +9479,18 @@ sends one allocation request and the other wave reads the counts back; the
 code around it exports vertex and primitive `thread` under
 `count > thread`. `mesh_skeleton` in `tools/startup/gfx2hlsl.py` states
 the shape and refuses every other program with the first difference. Before
-the count exchange, a full EXEC reset followed by a scalar-versus-thread-index
+the count exchange, a full EXEC reset followed by
 `v_cmpx_gt_u32_e32` or `v_cmpx_lt_u32_e32` may narrow EXEC. Only nops and waits
 may separate the compare from an `s_cbranch_execz` to the first count barrier.
-The compare must use the thread index established by the `v_mbcnt` pair. The
-skipped block allows nops, waits, clauses and lane-predicated instructions
-without scalar or EXEC writes, and scalar ALU whose SGPR results are not read
-from the count exchange on (SCC is rewritten by the exchange's
-`s_cmp_eq_i32`). Both guest exchange paths replace the incoming
-mask before lane-dependent work. In HLSL thread 0 stores both counts, every
-thread passes the group barrier, and full EXEC is restored before exports.
+The compare accepts SGPRs, inline constants or literals, and VGPRs defined
+for every lane. The skipped block allows nops, waits, clauses and
+lane-predicated instructions without scalar or EXEC writes, and scalar ALU
+whose SGPR results are not read from the count exchange on (SCC is rewritten by the exchange's
+`s_cmp_eq_i32`). Both guest exchange paths replace the incoming mask before
+lane-dependent work, so skipping per lane in HLSL has the same visible effects
+as skipping per wave on the guest for any compare predicate. In HLSL thread 0
+stores both counts, every thread passes the group barrier, and full EXEC is
+restored before exports.
 The lowering clamps both counts to the 128 threads of a group and each index to
 the last vertex. It reads 9-bit indices, ignores the edge flags, and gives a
 primitive whose null bit (31) is set one vertex three times, so it covers no

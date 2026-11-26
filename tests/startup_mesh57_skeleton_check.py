@@ -155,11 +155,18 @@ def count_entry_red(*extra_words):
 
 COUNT_ENTRY = count_entry_red()
 COUNT_ENTRY_LT = mutate('7da8000d', '7da2000d', mesh=COUNT_ENTRY)
+# v_mov_b32_e32 v8, 4 before the reset, then v_cmpx_lt_u32_e32 v8, v0.
+COUNT_ENTRY_VGPRS = mutate('7da8000d', '7da20108', mesh=COUNT_ENTRY)
+COUNT_ENTRY_VGPRS = COUNT_ENTRY_VGPRS[:COUNT + 1] + ['7e100284'] + COUNT_ENTRY_VGPRS[COUNT + 1:]
 DEAD_SCALAR = '87288080'  # s_and_b32 s40, 0, 0
 COUNT_ENTRY_SCALAR = count_entry_red(DEAD_SCALAR)
 COUNT_ENTRY_CASES = (
     ('EXEC-zero branch to the count exchange after GT', COUNT_ENTRY, lambda lane: 255 if lane < 4 else 0),
     ('EXEC-zero branch to the count exchange after LT', COUNT_ENTRY_LT, lambda lane: 255 if lane > 4 else 0),
+    ('EXEC-zero branch to the count exchange after LT with two VGPRs', COUNT_ENTRY_VGPRS,
+     lambda lane: 255 if lane > 4 else 0),
+    ('EXEC compare with a defined VGPR other than the thread index',
+     mutate('7da8000d', '7da80e0d', mesh=COUNT_ENTRY), lambda lane: 255),  # s13 > v7 (4 > 0)
     ('EXEC-zero branch to the count exchange over dead scalar ALU', COUNT_ENTRY_SCALAR,
      lambda lane: 255 if lane < 4 else 0),
 )
@@ -216,10 +223,8 @@ REFUSALS = (
     ('a branch into the count exchange',
      MESH[:COUNT] + [branch(0xbf82, COUNT, COUNT + 2)] + MESH[COUNT:],
      'slot 57 mesh: a branch enters or crosses a group-memory exchange'),
-    ('an EXEC compare with two VGPRs',
-     mutate('7da8000d', '7da80107', mesh=COUNT_ENTRY), EXCHANGE_BRANCH_REFUSAL),
-    ('an EXEC compare with a defined VGPR other than the thread index',
-     mutate('7da8000d', '7da80e0d', mesh=COUNT_ENTRY), EXCHANGE_BRANCH_REFUSAL),
+    ('an EXEC compare with an undefined first VGPR operand',
+     mutate('7da20108', '7da20101', mesh=COUNT_ENTRY_VGPRS), EXCHANGE_BRANCH_REFUSAL),
     ('an EXEC compare with an unmodelled entry VGPR',
      mutate('7da8000d', '7da8020d', mesh=COUNT_ENTRY), EXCHANGE_BRANCH_REFUSAL),
     ('no EXEC reset before the compare',
@@ -246,6 +251,8 @@ REFUSALS = (
      mutate('bf880001', 'bf880002', mesh=COUNT_ENTRY), EXCHANGE_BRANCH_REFUSAL),
     ('a branch that bypasses the EXEC reset',
      COUNT_ENTRY[:COUNT] + ['bf850002'] + COUNT_ENTRY[COUNT:], EXCHANGE_BRANCH_REFUSAL),
+    ('a branch into the skipped count-entry block',
+     COUNT_ENTRY[:COUNT] + ['bf850004'] + COUNT_ENTRY[COUNT:], EXCHANGE_BRANCH_REFUSAL),
     ('a branch over the group-index exchange', MESH[:1] + [branch(0xbf82, 1, GROUP_END + 1)] + MESH[1:],
      'slot 57 mesh: a branch enters or crosses a group-memory exchange'),
     # s_branch .post_count replaces s_waitcnt lgkmcnt(0) between the exchanges.

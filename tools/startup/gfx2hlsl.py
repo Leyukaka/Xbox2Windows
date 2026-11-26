@@ -1395,6 +1395,9 @@ def mesh_skeleton(ins, vcc_branches, wave_limits):
     - Exchange: exec = 1 (lane 0 of each wave), the mask saved in an SGPR pair; wave 0 (s3 bits 24..27 zero) stores
       entry v5 >> 7 at byte 8, waits and passes a barrier; every other wave passes a barrier and reads byte 8 to v5.
     - Code up to the next barrier. Its only read of v5 may be one v_readfirstlane_b32 under exec = -1.
+      After a full EXEC reset, an unsigned GT or LT EXEC compare with defined operands may guard a forward
+      execz branch to that barrier. The skipped instructions only affect active lanes or dead scalars, and
+      both exchange arms replace EXEC, so a per-lane skip has the same visible effects as a per-wave skip.
     - Counts: one barrier; the wave whose index (s_bfe_u32 of s3, 4 bits at 24) is zero stores SGPR P at byte 0 and
       SGPR V at byte 4 under the saved lane-0 mask, waits, passes a barrier and sends one allocation request with
       m0 = P << 12 | V; every other wave passes a barrier and reads both words back into the same P and V.
@@ -1492,9 +1495,13 @@ def mesh_skeleton(ins, vcc_branches, wave_limits):
                 while compare >= lo and ins[compare][2] in ('s_nop', 's_waitcnt'):
                     compare -= 1
                 if (compare <= lo or ins[compare - 1][3] != 's_mov_b64 exec, -1'
-                        or not re.fullmatch(r'v_cmpx_(gt|lt)_u32_e32 s\d+, v\d+', ins[compare][3])
+                        or ins[compare][2] not in ('v_cmpx_gt_u32_e32', 'v_cmpx_lt_u32_e32')
                         or any(not (no_effect(k) or lane_only(k) or dead_count_entry_scalar(k))
                                for k in range(i + 1, dest))):
+                    raise Unsupported(exchange_branch_refusal)
+                _, sources, _ = parse(ins[compare][3])
+                if len(sources) != 2 or any(not (re.fullmatch(r'[sv]\d+', tok) or tok in FLOATS
+                                                 or pc_word(tok) is not None) for tok in sources):
                     raise Unsupported(exchange_branch_refusal)
                 count_entry, count_entry_branch = compare, i
             if target <= off:
@@ -1673,7 +1680,7 @@ def mesh_skeleton(ins, vcc_branches, wave_limits):
             pending.clear()
             mask, scc_stale = ('else', mask), True
         elif index == count_entry:
-            if mask is not None or thread is None or thread in stale or ops[1:] != ['v%d' % thread]:
+            if mask is not None or mesh_vregs(ops) & stale:
                 raise Unsupported(exchange_branch_refusal)
             mask = 'count_entry'
         elif base_name.startswith('v_cmpx'):
