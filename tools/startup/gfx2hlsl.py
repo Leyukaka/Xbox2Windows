@@ -1437,6 +1437,40 @@ def mesh_skeleton(ins, vcc_branches, wave_limits):
 
     offsets = {item[0]: i for i, item in enumerate(ins)}
     edges = {}
+    count_entry = count_entry_branch = None
+    no_effect = lambda i: ins[i][2].startswith(('s_nop', 's_waitcnt', 's_clause'))
+    exchange_branch_refusal = 'slot 57 mesh: a branch enters or crosses a group-memory exchange'
+
+    def lane_only(i):
+        _, _, name, asm = ins[i]
+        return (name.startswith(('v_', 'buffer_load')) and not name.startswith(EXECZ_REFUSED)
+                and not scalar_effects(name, asm)[2])
+
+    def dead_count_entry_scalar(i):
+        _, _, name, asm = ins[i]
+        if not re.fullmatch(
+                r's_(and|or|xor|andn2|orn2|bfe|max|min|mul|add|sub|lshl|lshr|ashr|mov|movk)_[biu]\d+', name):
+            return False
+        _, must, may = scalar_effects(name, asm)
+        written = must | may
+        regs = written - {'scc'}
+        if not written or any(not re.fullmatch(r's\d+', reg) for reg in regs):
+            return False
+        # Uses within the skipped block are fine. Every path out of it joins at the count exchange.
+        if any(regs & scalar_effects(*ins[j][2:])[0] for j in range(count_at, len(ins))):
+            return False
+        if 'scc' in written:
+            for j in range(count_at, len(ins)):
+                reads, must, may = scalar_effects(*ins[j][2:])
+                if ins[j][2].startswith(('s_cbranch', 's_branch', 's_setpc', 's_call', 's_swappc', 's_endpgm')):
+                    return False
+                if 'scc' in reads:
+                    return False
+                if 'scc' in must:  # a may-write alone (s_barrier) neither reads nor kills it
+                    return True
+            return False
+        return True
+
     for lo, hi in ((0, start), (a_end, count_at), (b_end, len(ins))):
         for i in range(lo, hi):
             off, _, name, asm = ins[i]
@@ -1450,10 +1484,19 @@ def mesh_skeleton(ins, vcc_branches, wave_limits):
             dest = offsets.get(target)
             if dest is None:
                 raise Unsupported('slot 57 mesh: a branch target is not an instruction boundary')
-            # The first instruction of an exchange is also the preceding region's join.
-            # Branches must reconverge before that instruction.
             if not lo <= dest < hi:
-                raise Unsupported('slot 57 mesh: a branch enters or crosses a group-memory exchange')
+                # Both count exchange arms replace the incoming EXEC before lane-dependent work.
+                if lo != a_end or dest != count_at or name != 's_cbranch_execz':
+                    raise Unsupported(exchange_branch_refusal)
+                compare = i - 1
+                while compare >= lo and ins[compare][2] in ('s_nop', 's_waitcnt'):
+                    compare -= 1
+                if (compare <= lo or ins[compare - 1][3] != 's_mov_b64 exec, -1'
+                        or not re.fullmatch(r'v_cmpx_(gt|lt)_u32_e32 s\d+, v\d+', ins[compare][3])
+                        or any(not (no_effect(k) or lane_only(k) or dead_count_entry_scalar(k))
+                               for k in range(i + 1, dest))):
+                    raise Unsupported(exchange_branch_refusal)
+                count_entry, count_entry_branch = compare, i
             if target <= off:
                 raise Unsupported('slot 57 mesh: a loop outside the group-memory exchanges is not covered')
             if name not in ('s_branch', 's_cbranch_scc0', 's_cbranch_scc1', 's_cbranch_execz') + MESH_VCC_BRANCHES:
@@ -1461,7 +1504,8 @@ def mesh_skeleton(ins, vcc_branches, wave_limits):
             edges[i] = dest
 
     targets = set(edges.values())
-    no_effect = lambda i: ins[i][2].startswith(('s_nop', 's_waitcnt', 's_clause'))
+    if count_entry is not None and targets.intersection(range(count_entry, count_at)):
+        raise Unsupported(exchange_branch_refusal)
     first_post_count_branch = next((i for i in edges if i >= b_end), None)
     shift_branch = None
     for source, target in edges.items():
@@ -1476,12 +1520,11 @@ def mesh_skeleton(ins, vcc_branches, wave_limits):
             # s_branch may land at the execz target or past it over instructions without effect (the
             # `s_branch .else` over `.empty: s_nop` of an if/else), so both paths meet with the same state.
             for i in range(source + 1, target):
-                _, _, name, asm = ins[i]
+                name = ins[i][2]
                 if not (no_effect(i) or name == 'exp'
                         or (name == 's_branch' and edges[i] >= target
                             and all(no_effect(k) for k in range(target, edges[i])))
-                        or (name.startswith(('v_', 'buffer_load')) and not name.startswith(EXECZ_REFUSED)
-                            and not scalar_effects(name, asm)[2])):
+                        or lane_only(i) or (source == count_entry_branch and dead_count_entry_scalar(i))):
                     raise Unsupported('slot 57 mesh: s_cbranch_execz skips code with effects outside active lanes')
         elif any(ins[i][2] == 'exp' for i in range(source + 1, target)):
             raise Unsupported('slot 57 mesh: a branch bypasses an export')
@@ -1504,7 +1547,7 @@ def mesh_skeleton(ins, vcc_branches, wave_limits):
     exports = []
     incoming = {}
     falls = True
-    for index in (list(range(first, start)) + [start] + list(range(a_end, count_at)) + [None]
+    for index in (list(range(first, start)) + [start] + list(range(a_end, count_at + 1))
                   + list(range(b_end, len(ins)))):
         if index in targets:
             paths = incoming[index]
@@ -1536,7 +1579,7 @@ def mesh_skeleton(ins, vcc_branches, wave_limits):
             if base == a_bits or base in lane:
                 base = None
             continue
-        if index is None:
+        if index == count_at:
             if not wave_known:
                 raise Unsupported('slot 57 mesh count exchange: the compared register is not the wave index')
             out.append(span(count_at, b_end - 2) + (
@@ -1629,6 +1672,10 @@ def mesh_skeleton(ins, vcc_branches, wave_limits):
             stale |= pending
             pending.clear()
             mask, scc_stale = ('else', mask), True
+        elif index == count_entry:
+            if mask is not None or thread is None or thread in stale or ops[1:] != ['v%d' % thread]:
+                raise Unsupported(exchange_branch_refusal)
+            mask = 'count_entry'
         elif base_name.startswith('v_cmpx'):
             count = {env['verts']: 'verts', env['prims']: 'prims'}.get(ops[0] if ops else None)
             if (base_name != 'v_cmpx_gt_i32' or not after or mask is not None or count is None
