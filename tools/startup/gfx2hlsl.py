@@ -2090,6 +2090,13 @@ class Stage:
         elif getattr(self, 'vcc_lost', False):
             raise Unsupported('vcc read after a descriptor load into s106/s107')
 
+    def mark_vcc_descriptor(self):
+        self.vcc_lost = True
+        self.vcc_descriptor_overwritten = False
+        if getattr(self, 'has_branches', False):
+            value = tuple(self.sym[i] for i in (106, 107))
+            self.vcc_events.setdefault(self.pc, []).append(('load_descriptor', value))
+
     def emit(self, text):
         if 'vcc' in text:
             assignment = re.match(r'vcc = (.*);$', text)
@@ -2260,6 +2267,10 @@ class Stage:
                 self.vcc_events.setdefault(self.pc, []).append(('read_descriptor', expected))
             elif getattr(self, 'vcc_descriptor_overwritten', False):
                 raise Unsupported('descriptor operand %s overlaps a redefined vcc' % tok)
+        if r == ('s', 104, 107) and s and s[0] == 'desc' and (
+                s[3] % 4 or
+                any(self.sym.get(104 + i) != desc_word(s, s[3] + i) for i in range(1, 4))):
+            raise Unsupported('descriptor operand %s needs four consecutive words of the same descriptor' % tok)
         if s and s[0] == 'desc':
             # A descriptor can start inside a wider load (s_load_dwordx16 fetches two image
             # descriptors): its offset is the load's offset plus the first register's dword index.
@@ -2702,6 +2713,7 @@ class Stage:
             self.float_const_s = {}     # SGPR -> 32-bit pattern from s_mov_b32 of an inline float constant
             self.has_branches = bool(targets)
             self.vcc_events = {}
+            self.vcc_lost = self.vcc_descriptor_overwritten = False
             self.entry_table_pointers = {
                 reg: sym[1] for reg, sym in init_sym.items()
                 if isinstance(reg, int) and sym[0] == 'ptr' and sym[1][0] == 'table'
@@ -2869,6 +2881,16 @@ class Stage:
                         term = ('branch', '!wave_any', term[2])
                 except Unsupported as reason:
                     if refusals is None:
+                        if self.has_branches and ('read_vcc', None) in self.vcc_events.get(off, ()):
+                            # Some operand handlers refuse VCC before emitting code. Check whether
+                            # a path to this instruction has already overwritten the mask.
+                            self.blocks.append((start, self.lines, None))
+                            try:
+                                self.check_vcc_paths()
+                            except Unsupported as vcc_reason:
+                                reason = vcc_reason
+                            finally:
+                                self.blocks.pop()
                         if not hasattr(reason, 'instruction'):
                             reason.instruction = name  # for fail_reason(); the message itself is unchanged
                         raised_unsupported = reason
@@ -3001,6 +3023,19 @@ class Stage:
 
     def one(self, name, asm):
         _, ops, mods = parse(asm)
+        if (getattr(self, 'vcc_lost', False) or
+                (getattr(self, 'has_branches', False) and
+                 ('vcc' in asm or name.startswith(IMPLICIT_VCC_READ)))):
+            # Read operands even in handlers that refuse a mask as numeric data before calling u().
+            # VOPC's two-operand spelling has an implicit destination, and v_cmpx e64 prints an unused SDST.
+            if name.startswith('v_cmpx') and name.endswith('_e64') and len(ops) == 3:
+                reads = scalar_tokens(' '.join(ops[1:]))
+            elif name.startswith('v_cmp') and len(ops) == 2:
+                reads = scalar_tokens(' '.join(ops))
+            else:
+                reads, _, _ = scalar_effects(name, asm)
+            if reads & {'vcc', 'vcc_hi'}:
+                self.read_vcc()
         if name.endswith('_e32') and name[:-4] in VOP3_ONLY_VEC_U:
             raise Unsupported(name)
         base = re.sub(r'_e(32|64)$', '', name)
@@ -3736,6 +3771,18 @@ class Stage:
             r = reg_range(t)
             return self.sym.get(r[1]) if r and r[0] == 's' else None
         syms = [src_sym(t) for t in srcs]
+        mask_dest = dname in ('exec', 'vcc', 'exec_lo', 'vcc_lo', 'exec_hi', 'vcc_hi')
+        if base == 's_mov_b64' and ops[0] == 'vcc' and len(ops) == 2:
+            source = reg_range(ops[1])
+            if source and source[0] == 's':
+                words = (syms[0], self.sym.get(source[2]))
+                if any(word and word[0] == 'desc' for word in words):
+                    if (source[1] % 2 or source[2] != source[1] + 1 or
+                            any(not word or word[0] != 'desc' for word in words)):
+                        raise Unsupported('mask from descriptor data: vcc needs an even pair of descriptor words')
+                    self.sym[106], self.sym[107] = words
+                    self.mark_vcc_descriptor()
+                    return None
         if any(s and s[0] in ('desc', 'descnum', 'ptr', 'ptrhi') for s in syms):
             if scc or base in SCC_UNMODELLED:
                 self.scc_effect = 'descriptor'
@@ -3752,7 +3799,7 @@ class Stage:
                     raise Unsupported('scc from descriptor data')
                 self.sym['m0'] = syms[0] if base == 's_mov_b32' else ('descnum',)
                 return None
-            if dname in ('exec', 'vcc', 'exec_lo', 'vcc_lo'):
+            if mask_dest:
                 raise Unsupported('mask from descriptor data')
             d = reg_range(dname)[1]
             own = self.sym.get(d)
@@ -4228,11 +4275,7 @@ class Stage:
             for i in range(count):
                 self.sym[dst[1] + i] = ('desc', p[1], base_off + off, i) + load
             if into_vcc:
-                self.vcc_lost = True
-                self.vcc_descriptor_overwritten = False
-                if getattr(self, 'has_branches', False):
-                    value = tuple(self.sym.get(i) for i in (106, 107))
-                    self.vcc_events.setdefault(self.pc, []).append(('load_descriptor', value))
+                self.mark_vcc_descriptor()
             return
         if into_vcc:
             raise Unsupported('s_load destination %s for %d dwords' % (ops[0], count))

@@ -15282,6 +15282,23 @@ ctest --preset dev --no-tests=error -R '^startup_gfx2hlsl_refusals$' -V
 python -B tools/startup/gfx2hlsl.py --refusals out/startup/shader_cache
 ```
 
+## Startup translator descriptor words in VCC
+
+An `s_load_dwordx4` from a descriptor table can end at `s[104:107]`
+because the translator tracks the four words symbolically (#2057). The same
+tracking applies when `s_mov_b64 vcc, s[n:n+1]` copies two descriptor words
+from an even-aligned pair into s106/s107. The source registers can then be
+overwritten. A load through `s[104:107]` requires four consecutive words of
+the same descriptor. Reading VCC as a mask before a new VCC definition is
+refused, including on a branch path that bypasses the definition.
+
+`startup_gfx2hlsl_desc_vcc` checks the symbol copy, descriptor validation, and
+mask refusals. The WARP and hardware variants assemble a direct and an aliased
+pixel shader and compare both readbacks with the same four words. The
+flat-parameter runner binds only entry constants, so the fixture supplies the
+buffer bytes through an HLSL load function after checking the translated
+resource key and load calls.
+
 ## Startup translator: SMEM offset operands
 
 `tools/startup/gfx2hlsl.py` accepts these offset operands for the scalar memory loads ([issue #1674](https://github.com/R0Y00/Xbox2Windows/issues/1674)):
