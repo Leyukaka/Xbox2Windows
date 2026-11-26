@@ -72,7 +72,14 @@ def controls(llvm_mc):
             if d16:
                 partial[7] |= 0x80
             refused('typed UAV store writes all four channels', lambda: pipeline(form, bytes(partial)))
-    print('Compute 1D, 3D and 3D NSA stores, manifest and refusal checks passed')
+        # d16 with the full mask takes the same packed-half path as 2D: two data VGPRs unpacked low half first.
+        # Manual mutant: dropping the f16tof32 unpack for these kinds must fail this assertion.
+        packed = bytearray(store)
+        packed[7] |= 0x80
+        d16_hlsl = pipeline(form, bytes(packed)).hlsl_cs()
+        d16_store = f'w0[{index}] = float4(f16tof32(v8 & 0xffffu), f16tof32(v8 >> 16), f16tof32(v9 & 0xffffu), f16tof32(v9 >> 16));'
+        assert d16_store in d16_hlsl, d16_hlsl
+    print('Compute 1D, 3D and 3D NSA stores, d16 full-mask stores, manifest and refusal checks passed')
 
 
 if __name__ == '__main__':
