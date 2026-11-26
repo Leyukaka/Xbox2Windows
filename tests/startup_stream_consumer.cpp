@@ -403,7 +403,7 @@ static int texture_slot67(void* device, const std::string& mode)
 {
     constexpr UINT width = 32;
     const bool volume = mode == "texture-volume" || mode == "texture-volume-bad-w";
-    const bool line = mode == "texture-line";
+    const bool line = mode == "texture-line" || mode == "texture-line-bad-mip";
     const UINT mip = volume || line ? 1 : 0;
     const UINT height = line ? 1 : 8;
     const bool fp32 = volume || line || mode == "texture-array" || mode == "texture-array-2d";
@@ -458,7 +458,7 @@ static int texture_slot67(void* device, const std::string& mode)
         view.Texture3D = {mip, 1, mode == "texture-volume-bad-w" ? layers : ~0u};
     } else if (line) {
         view.ViewDimension = D3D12_UAV_DIMENSION_TEXTURE1D;
-        view.Texture1D.MipSlice = mip;
+        view.Texture1D.MipSlice = mode == "texture-line-bad-mip" ? mip + 1 : mip;  // bad-mip: one past the last mip
     } else if (layers > 1) {
         view.ViewDimension = D3D12_UAV_DIMENSION_TEXTURE2DARRAY;
         view.Texture2DArray = {0, 1, 4, 0}; // four selected slices, with untouched neighbors on both sides

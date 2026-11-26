@@ -187,6 +187,9 @@ def store_3d1d(directory, consumer, dxc, env, form):
     if volume:
         # Manual mutant: skipping the mip-relative W-range check must fail the required refusal.
         cases.append(('texture-volume-bad-w', initial, 'an output 3D texture W range is outside the mip'))
+    else:
+        # Manual mutant: dropping the 1D mip check before `created` must fail this required refusal.
+        cases.append(('texture-line-bad-mip', initial, 'an output 1D texture mip is outside the resource'))
     for bad_mode, untouched, reason in cases:
         got, result = run(directory, consumer, env, bad_mode, '<%dI' % len(untouched))
         refusal = lines(result, 'Dispatch(2, 1, 1) refused:')

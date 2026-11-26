@@ -326,14 +326,18 @@ const char* record_translated_dispatch(Wrapper* self, const TranslatedDispatch& 
                     reason = volume_uav_range_error(resource, view);
                     if (!reason && !created) reason = "an output texture view was not created on the desktop";
                 }
-            } else if (!created || !texture || !(resource.Flags & D3D12_RESOURCE_FLAG_ALLOW_UNORDERED_ACCESS))
-                reason = "an output texture view was not created on the desktop";
-            else if (slot.uav_dimension == D3D12_UAV_DIMENSION_TEXTURE1D) {
+            } else if (slot.uav_dimension == D3D12_UAV_DIMENSION_TEXTURE1D &&
+                       texture && (resource.Flags & D3D12_RESOURCE_FLAG_ALLOW_UNORDERED_ACCESS)) {
+                // Checked before `created`, as for 3D: slot 19 records a 1D view with an out-of-range mip as refused.
                 if (!described || desc.ViewDimension != slot.uav_dimension || resource.Dimension != D3D12_RESOURCE_DIMENSION_TEXTURE1D)
                     reason = "an output texture view or resource is not 1D";
                 else if (desc.Texture1D.MipSlice >= resource.MipLevels)
                     reason = "an output 1D texture mip is outside the resource";
-            } else if (slot.uav_dimension == D3D12_UAV_DIMENSION_TEXTURE2DARRAY) {
+                else if (!created)
+                    reason = "an output texture view was not created on the desktop";
+            } else if (!created || !texture || !(resource.Flags & D3D12_RESOURCE_FLAG_ALLOW_UNORDERED_ACCESS))
+                reason = "an output texture view was not created on the desktop";
+            else if (slot.uav_dimension == D3D12_UAV_DIMENSION_TEXTURE2DARRAY) {
                 // The layer in HLSL is relative to FirstArraySlice: retain the caller's complete view.
                 const auto& a = desc.Texture2DArray;
                 if (!described || desc.ViewDimension != D3D12_UAV_DIMENSION_TEXTURE2DARRAY)
