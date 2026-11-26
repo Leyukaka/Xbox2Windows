@@ -1695,19 +1695,30 @@ struct DirectCompute {
         } else
             vector_write(i.dst, place_subword(i, z));
     }
-    void mirror(const Inst &i, const State &state, unsigned threads) {
-        // A row is contained in one physical wave32 even for split guest wave64.
+    void lower_dpp(const Inst &i, const State &state, unsigned threads) {
+        // Both lane selections stay in one physical wave32 for split guest wave64.
         // Shader control flow stays wave-uniform. Guest EXEC predicates VGPR
         // writes, so FI can fetch the last VGPR value from a disabled thread.
         const unsigned mask = i.mirror_mask();
-        if (threads % (mask + 1))
-            refuse(i.pc, "DPP mirror needs complete source lane groups");
+        const unsigned group_size = mask ? mask + 1 : 4;
+        if (threads % group_size)
+            refuse(i.pc, mask ? "DPP mirror needs complete source lane groups"
+                              : "DPP quad_perm needs a thread count divisible by four");
         const auto rule = alu_rules.find(i.name);
         if (rule == alu_rules.end() || rule->second.arity > 2)
             refuse(i.pc, "unsupported DPP arithmetic");
         if (i.enc == Encoding::Vop1 && ((i.neg | i.abs) & 2))
             refuse(i.pc, "unexpected second DPP source modifier");
-        auto source_lane = ir.binary("xor", lane, to_string(mask));
+        string source_lane;
+        if (mask)
+            source_lane = ir.binary("xor", lane, to_string(mask));
+        else {
+            auto quad_base = ir.binary("and", lane, "4294967292");
+            auto quad_lane = ir.binary("and", lane, "3");
+            auto shift = ir.binary("shl", quad_lane, "1");
+            auto fields = ir.binary("lshr", to_string(*i.dpp_control), shift);
+            source_lane = ir.binary("or", quad_base, ir.binary("and", fields, "3"));
+        }
         auto src = operand32(i, i.src[0]);
         auto word = ir.invoke("i32", "waveReadLaneAt.i32", 117, {{"i32",src},{"i32",source_lane}}, "nounwind");
         string source_enabled, previous;
@@ -1763,7 +1774,9 @@ struct DirectCompute {
                     auto pred = cmp((i.op & 1) ? "ne" : "eq", mask, "0");
                     ir.body << "  br i1 " << pred << ", label %pc" << i.target() << ", label %pc" << i.next << "\n";
                 }
-            } else if (i.name == "s_endpgm")
+            } else if (i.dpp_control)
+                lower_dpp(i, p.before[k], x*y*z);
+            else if (i.name == "s_endpgm")
                 ir.body << "  ret void\n";
             // Hardware scheduling and register-dependency waits have no SGPR
             // operands. SSA dependencies carry these constraints into DXIL.
@@ -1791,8 +1804,6 @@ struct DirectCompute {
                 refuse(i.pc, "unsupported compute control instruction " + string(i.name));
             else if (i.enc == Encoding::Image)
                 image_io(i, p.before[k]);
-            else if (i.mirror_mask())
-                mirror(i, p.before[k], x*y*z);
             else
                 arithmetic(i, p.before[k]);
         }

@@ -2,6 +2,12 @@
 
 New notes go in `docs/experiments/<topic>.md` (see [the folder guide](experiments/README.md)); this file keeps the older notes.
 
+## Guest quad permutations in direct compute
+
+DPP16 quad permutations reuse the row mirror's EXEC and operand handling.
+The compute fixture checks arithmetic, lane selection and disabled sources.
+[Experiment and reproduction commands](experiments/native-dpp-quad-compute.md)
+
 ## Guest row mirrors and masked branches in the direct DXIL frontend
 
 The hardware fixture gives each guest lane a distinct value. DPP16 control

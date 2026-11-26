@@ -323,7 +323,7 @@ Inst decode(const string &bytes, unsigned pc,bool direct=false, bool graphics=fa
             if (control & (1u << 17)) refuse(pc,"reserved DPP16 control bit");
             const auto pattern = (control >> 8) & 0x1ff;
             i.dpp_control = pattern;
-            if (!i.mirror_mask() && (pattern > 255 || !graphics))
+            if (pattern > 255 && !i.mirror_mask())
                 refuse(pc,"unsupported DPP lane selection");
             i.dpp_fetch_inactive = (control & (1u << 18)) != 0;
             i.dpp_bound_zero = (control & (1u << 19)) != 0;
