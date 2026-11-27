@@ -66,7 +66,7 @@ def reference(cross_row, fi, bound_zero, selectors):
 
 
 def request(work, root, instruction, threads=64):
-    sa = struct.pack("<7I", 0, 0, 0, threads | (1 << 16), 1, 0, 0x8A)
+    sa = struct.pack("<7I", 0, 0, 0, threads | (1 << 16), 1 | (1 << 20), 0, 0x8A)  # bit 20: wave32 (#2999)
     return write_request(work, program(instruction), root, sa)
 
 
