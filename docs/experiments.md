@@ -31,6 +31,11 @@ The compute fixture checks arithmetic, lane selection and disabled sources.
 Full-mask row shifts and rotates stay inside each 16-lane row and apply
 BOUND_CTRL to unusable sources. [Experiment and reproduction commands](experiments/native-dpp-row.md)
 
+## Guest permlane16 and permlanex16 in direct compute
+
+VOP3A row permutations select lanes using uniform packed selectors.
+[Experiment and reproduction commands](experiments/native-permlane.md)
+
 ## Guest lane reads and writes in direct compute
 
 `v_readlane_b32` and `v_writelane_b32` lower with a constant or SGPR lane; lane writes ignore EXEC.

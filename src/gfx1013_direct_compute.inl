@@ -2882,6 +2882,51 @@ struct DirectCompute {
         } else
             vector_write(i.dst, place_subword(i, z));
     }
+    void lower_permlane(const Inst &i, unsigned threads) {
+        const bool cross_row = i.name == "v_permlanex16_b32";
+        if (threads % (cross_row ? 32 : 16))
+            refuse(i.pc, string(i.name) + " needs a thread count divisible by " + (cross_row ? "32" : "16"));
+
+        // VOP3A retains op_sel in word 0 bits 11..14: bit 0 is FI and bit 1 is BOUND_CTRL.
+        const unsigned op_sel = (i.a >> 11) & 15;
+        if ((op_sel & ~3u) || i.neg || i.abs || i.clamp || i.scale)
+            refuse(i.pc, "unsupported permlane modifier or op_sel");
+        const bool fi = op_sel & 1;
+        const bool bound_zero = op_sel & 2;
+
+        // D and S0 are VGPRs. S1 and S2 are uniform SGPRs or constants.
+        if (i.src[0] < 256)
+            refuse(i.pc, "permlane S0 must be a VGPR");
+        for (unsigned reg : {i.src[1], i.src[2]})
+            if (reg > 105 && (wave64 || reg != 107) && !constant32(i, reg))
+                refuse(i.pc, "permlane selectors must be uniform SGPRs or constants");
+
+        // S1 packs the nibbles for row lanes 0..7 and S2 packs those for 8..15.
+        auto row_lane = ir.binary("and", lane, "15");
+        auto selectors = select(cmp("uge", row_lane, "8"), operand32(i, i.src[2]), operand32(i, i.src[1]));
+        auto shift = ir.binary("shl", ir.binary("and", row_lane, "7"), "2");
+        auto pick = ir.binary("and", ir.binary("lshr", selectors, shift), "15");
+
+        // Permlane16 uses the current row; permlanex16 toggles row bit 4.
+        // Both rows of the pair are in the same physical wave32, even for guest wave64.
+        auto row_base = ir.binary("and", lane, "4294967280");
+        if (cross_row)
+            row_base = ir.binary("xor", row_base, "16");
+        auto source_lane = ir.binary("or", row_base, pick);
+        auto src = operand32(i, i.src[0]);
+        auto value = ir.invoke("i32", "waveReadLaneAt.i32", 117, {{"i32",src},{"i32",source_lane}}, "nounwind");
+
+        // Assume DPP's inactive-source rule: FI bypasses the guest EXEC test.
+        // Otherwise an inactive source yields zero with BOUND_CTRL or preserves D.
+        if (!fi) {
+            auto exec = wave64 ? select(upper_half, read(127), read(126)) : read(126);
+            auto source_bit = ir.binary("shl", "1", source_lane);
+            auto source_usable = cmp("ne", ir.binary("and", exec, source_bit), "0");
+            value = select(source_usable, value, bound_zero ? "0" : read(i.dst));
+        }
+        // Guest EXEC still predicates the destination write.
+        vector_write(i.dst, value);
+    }
     void lower_dpp(const Inst &i, const State &state, unsigned threads) {
         // All lane selections stay in one physical wave32 for split guest wave64.
         // Shader control flow stays wave-uniform. Guest EXEC predicates VGPR
@@ -3043,6 +3088,8 @@ struct DirectCompute {
                 }
             } else if (i.dpp_control)
                 lower_dpp(i, p.before[k], x*y*z);
+            else if (i.name == "v_permlane16_b32" || i.name == "v_permlanex16_b32")
+                lower_permlane(i, x*y*z);
             else if (i.name == "s_endpgm")
                 ir.body << "  ret void\n";
             // Hardware scheduling and register-dependency waits have no SGPR
