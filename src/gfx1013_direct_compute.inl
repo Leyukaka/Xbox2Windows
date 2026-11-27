@@ -1606,8 +1606,13 @@ struct DirectCompute {
                 refuse(i.pc, "unsupported " + string(n) + " SDWA form");
             if (i.scale)
                 refuse(i.pc, "unsupported " + string(n) + " omod");
-            if (i.wide && (i.a & 0x7800))
+            const unsigned op_sel = i.wide ? (i.a >> 11) & 15u : 0;
+            if (op_sel && (n != "v_fma_f16" || i.enc != Encoding::Vop3 || i.clamp))
                 refuse(i.pc, "unsupported " + string(n) + " high-half op_sel");
+            for (unsigned j = 0; j < 3; ++j) {
+                if ((op_sel & (1u << j)) && i.src[j] < 256)
+                    refuse(i.pc, "unsupported v_fma_f16 high-half op_sel on non-VGPR source");
+            }
             if (n == "v_fmac_f16" && i.wide && (((i.abs | i.neg) & 4) || i.src[2]))
                 refuse(i.pc, "unsupported v_fmac_f16 third-source modifier");
             if (!half_mode_known || ((mode_bits ^ 0xf0u) & 0x8000ccu))
@@ -1615,7 +1620,9 @@ struct DirectCompute {
             auto half_bits = [&](unsigned j) {
                 const unsigned r = i.src[j];
                 string bits;
-                if (r >= 240 && r <= 248) {
+                if (op_sel & (1u << j)) {
+                    bits = ir.binary("lshr", operand32(i, r), "16");
+                } else if (r >= 240 && r <= 248) {
                     constexpr unsigned halves[]{0x3800, 0xb800, 0x3c00, 0xbc00, 0x4000,
                                                 0xc000, 0x4400, 0xc400, 0x3118};
                     bits = to_string(halves[r - 240]);
@@ -1645,8 +1652,10 @@ struct DirectCompute {
                 auto low = ir.value("or i1 " + nan + ", " + cmp("ne", ir.binary("and", result, "32768"), "0"));
                 result = select(low, "0", select(cmp("ugt", result, "15359"), "15360", result));
             }
-            auto kept = ir.binary("and", read(i.dst), "4294901760");
-            vector_write(i.dst, ir.binary("or", kept, ir.binary("and", result, "65535")));
+            const bool dst_high = (op_sel & 8u) != 0;
+            auto kept = ir.binary("and", read(i.dst), dst_high ? "65535" : "4294901760");
+            auto placed = dst_high ? ir.binary("shl", result, "16") : ir.binary("and", result, "65535");
+            vector_write(i.dst, ir.binary("or", kept, placed));
             return true;
         }
         const auto rule = alu_rules.find(n);
