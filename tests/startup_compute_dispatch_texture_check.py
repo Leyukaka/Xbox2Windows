@@ -157,7 +157,9 @@ STORE_FORMS = {
 }
 STORE_VALUES = (0x3f400000, 0x3e800000, 0x40810000, 0xbf810001)
 STORE_RSRC2 = (10 << 1) | C.TGID_X | C.TGID_Y | C.tidig(2)
-NO_WAVES = 'pipeline creation failed: the adapter has no 32-lane waves'
+# The runtime reports the adapter capability next to the PSO failure; only this test knows its native
+# modules declare WaveSize(32), so only here does that observation explain the failure.
+NO_WAVES = 'pipeline creation failed (adapter has no 32-lane waves)'
 
 
 def store_group(form):

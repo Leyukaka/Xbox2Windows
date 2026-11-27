@@ -3549,8 +3549,11 @@ On an NVIDIA GeForce RTX 5080 (Windows 11, DXC from the Windows SDK 10.0.26100),
 store cases matched their mip-one words after `compile_dxil` published the translations. The mismatched-view,
 3D W-range and 1D mip controls were refused with their sentinels intact.
 
-If a published compute PSO fails to create, the stand-in checks the adapter's wave capabilities. The native
-3D, 3D NSA and 1D cases report a WARP skip only for `pipeline creation failed: the adapter has no 32-lane waves`.
-Other PSO failures fail the test. On WARP and hardware, portable `cs_6_0` fixtures publish a hand-written
+If a published compute PSO fails to create, the refusal stays `pipeline creation failed`, and the stand-in adds
+the adapter's 32-lane wave capability as observed: `(adapter has no 32-lane waves)`, or `(adapter wave capability
+query failed)`. The manifest records no wave size, so this does not say the shader needed one. The test knows its
+native modules declare `WaveSize(32)`, so the native 3D, 3D NSA and 1D cases skip on WARP only for
+`pipeline creation failed (adapter has no 32-lane waves)`. Any other PSO failure fails the test.
+On WARP and hardware, portable `cs_6_0` fixtures publish a hand-written
 manifest and bytecode under the original guest program's request key. These cases require successful 3D and 1D
 mip-one readback and check the same mismatched-view, 3D W-range and 1D mip refusals with sentinels intact.
