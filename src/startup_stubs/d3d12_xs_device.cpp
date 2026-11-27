@@ -17,10 +17,12 @@
 #include "xmem_page_batch.h"
 #include "startup_stubs/local_log.h"
 #include "startup_stubs/logical_view_table.h"
+#include "startup_stubs/manifest_retry.h"
 #include "startup_stubs/list_compute_root.h"
 #include "startup_stubs/overlay_window.h"
 #include "startup_stubs/draw_bmp.h"
 #include "startup_stubs/draw_dump_tracking.h"
+#include "startup_stubs/present_readback_state.h"
 #include "startup_stubs/pixel_history.h"
 #include "startup_stubs/translated_sampler_bindings.h"
 #include "startup_stubs/export_write_mask.h"
@@ -1596,6 +1598,25 @@ x2w_upload::Allocation list_upload_range(Wrapper* self, UINT64 address, UINT64 b
     ReleaseSRWLockShared(&allocator_lock);
     return allocation;
 }
+x2w_upload::Allocation list_upload_tail(Wrapper* self, UINT64 address)
+{
+    x2w_upload::Allocation allocation{};
+    AcquireSRWLockShared(&allocator_lock);
+    const auto& state = self->own();
+    if (state.list_open && state.list_uploads) {
+        for (auto it = state.list_uploads->allocations.rbegin(); it != state.list_uploads->allocations.rend(); ++it) {
+            if (address < it->cpu) continue;
+            const UINT64 offset = address - it->cpu;
+            if (offset < it->bytes) {
+                allocation = {static_cast<uintptr_t>(address), it->gpu + offset, it->bytes - offset, it->resource,
+                              it->offset + offset};
+                break;
+            }
+        }
+    }
+    ReleaseSRWLockShared(&allocator_lock);
+    return allocation;
+}
 UINT64 list_upload_gpu(Wrapper* self, UINT64 address, UINT64 bytes) { return list_upload_range(self, address, bytes).gpu; }
 
 // Fixture lookup. The full range must belong to this list's open recording.
@@ -1899,6 +1920,92 @@ void complete_when_reached(Wrapper* fence, UINT64 value)
     SetThreadpoolWait(wait, pending->event, nullptr);
 }
 
+// The queued diagnostic readback's ownership: the submitted surface and queue references, the
+// recording objects and the completion state, module-lifetime storage guarded by a mutex the
+// sampling path and the drain below serialize through. The sample's wait event is created lazily
+// with the recording, not at module load.
+struct PresentedReadback {
+    std::mutex mutex;
+    x2w_startup::PresentReadbackState completion;
+    ID3D12CommandAllocator* allocator = nullptr;
+    ID3D12GraphicsCommandList* list = nullptr;
+    ID3D12Fence* fence = nullptr;
+    ID3D12Resource* readback = nullptr;
+    UINT64 readback_bytes = 0, fence_value = 0;
+    ID3D12Resource* submitted_surface = nullptr;
+    ID3D12CommandQueue* submitted_queue = nullptr;
+    HANDLE wait_event = nullptr;
+} presented_readback;
+
+// Releases the ownership a completed submission held (exactly once, through retire); the caller
+// must hold the mutex and have seen a completed observation.
+void release_readback_ownership()
+{
+    presented_readback.submitted_surface->Release();
+    presented_readback.submitted_queue->Release();
+    presented_readback.submitted_surface = nullptr;
+    presented_readback.submitted_queue = nullptr;
+}
+
+// Hold the fence and shim module until the asynchronous callback returns.
+struct PendingDrain {
+    ID3D12Fence* fence;
+    std::uint64_t value;
+    HANDLE event;
+    HMODULE module;
+};
+
+// Retire only the registered submission; never publish a late diagnostic image.
+void CALLBACK readback_drained(PTP_CALLBACK_INSTANCE instance, void* context, PTP_WAIT wait, TP_WAIT_RESULT)
+{
+    std::unique_ptr<PendingDrain> pending{static_cast<PendingDrain*>(context)};
+    CloseThreadpoolWait(wait);
+    {
+        const std::lock_guard lock(presented_readback.mutex);
+        if (presented_readback.fence == pending->fence)
+            presented_readback.completion.retire(pending->fence->GetCompletedValue(), release_readback_ownership,
+                                                 pending->value);
+    }
+    pending->fence->Release();
+    CloseHandle(pending->event);
+    FreeLibraryWhenCallbackReturns(instance, pending->module);
+}
+
+// Caller holds the readback mutex. On registration failure, retain ownership.
+void drain_readback_when_complete()
+{
+    HMODULE module = nullptr;
+    if (!GetModuleHandleExW(GET_MODULE_HANDLE_EX_FLAG_FROM_ADDRESS, reinterpret_cast<LPCWSTR>(&presented_readback),
+                            &module)) {
+        log("x2w-render readback drain unavailable: no shim module reference");
+        return;
+    }
+    HANDLE event = CreateEventW(nullptr, FALSE, FALSE, nullptr);
+    auto* pending = event ? new (std::nothrow) PendingDrain{presented_readback.fence, presented_readback.fence_value,
+                                                            event, module}
+                          : nullptr;
+    PTP_WAIT wait = pending ? CreateThreadpoolWait(&readback_drained, pending, nullptr) : nullptr;
+    if (!pending || !wait) {
+        if (event) CloseHandle(event);
+        delete pending;
+        if (wait) CloseThreadpoolWait(wait);
+        FreeLibrary(module);
+        log("x2w-render readback drain unavailable: event, wait or context allocation failed");
+        return;
+    }
+    presented_readback.fence->AddRef();
+    const HRESULT hr = presented_readback.fence->SetEventOnCompletion(pending->value, pending->event);
+    if (FAILED(hr)) {
+        presented_readback.fence->Release();
+        delete pending;
+        CloseHandle(event);
+        CloseThreadpoolWait(wait);
+        FreeLibrary(module);
+        log("x2w-render readback drain registration failed 0x%08lx", static_cast<unsigned long>(hr));
+        return;
+    }
+    SetThreadpoolWait(wait, pending->event, nullptr);
+}
 // The presented surface, read back and reduced for the window (BGRA, top-down).
 constexpr int shown_width = 960, shown_height = 540;
 std::vector<std::uint32_t> shown_pixels;
@@ -1923,12 +2030,38 @@ void read_back_presented(ID3D12CommandQueue* queue, ID3D12Resource* surface, int
         static LONG raw_failures;
         if (first_calls(raw_failures, 4)) log("x2w-render raw plane %d (not composited): %s", raw_plane, failure);
     };
-    static ID3D12CommandAllocator* allocator;
-    static ID3D12GraphicsCommandList* list;
-    static ID3D12Fence* fence;
-    static ID3D12Resource* readback;
-    static UINT64 readback_bytes, fence_value;
-    static HANDLE event = CreateEventW(nullptr, FALSE, FALSE, nullptr);
+    const std::lock_guard lock(presented_readback.mutex);
+    auto& completion = presented_readback.completion;
+    auto& allocator = presented_readback.allocator;
+    auto& list = presented_readback.list;
+    auto& fence = presented_readback.fence;
+    auto& readback = presented_readback.readback;
+    auto& readback_bytes = presented_readback.readback_bytes;
+    auto& fence_value = presented_readback.fence_value;
+    auto& submitted_surface = presented_readback.submitted_surface;
+    auto& submitted_queue = presented_readback.submitted_queue;
+    HANDLE& event = presented_readback.wait_event;
+    const auto discard_recording = [&] {
+        if (list) { list->Release(); list = nullptr; }
+        if (allocator) { allocator->Release(); allocator = nullptr; }
+        if (fence) { fence->Release(); fence = nullptr; }
+        fence_value = 0;
+    };
+    if (completion.unusable()) {
+        std::snprintf(failure, sizeof(failure), "readback unavailable after fence failure");
+        report_failure();
+        return;
+    }
+    if (completion.pending()) {
+        const auto state = completion.retire(fence->GetCompletedValue(), release_readback_ownership);
+        if (state != x2w_startup::FenceCompletion::completed) {
+            std::snprintf(failure, sizeof(failure), "%s",
+                          state == x2w_startup::FenceCompletion::removed ?
+                          "readback fence reported device removal" : "previous readback still in flight");
+            report_failure();
+            return;
+        }
+    }
     ID3D12Device* device = device_of(the_device);
     const D3D12_RESOURCE_DESC desc = surface->GetDesc();
     D3D12_PLACED_SUBRESOURCE_FOOTPRINT footprint{};
@@ -1969,6 +2102,7 @@ void read_back_presented(ID3D12CommandQueue* queue, ID3D12Resource* surface, int
     if (SUCCEEDED(hr)) hr = allocator->Reset();
     if (SUCCEEDED(hr)) hr = list->Reset(allocator, nullptr);
     if (FAILED(hr)) {
+        discard_recording();
         std::snprintf(failure, sizeof(failure), "readback setup failed 0x%08lx", static_cast<unsigned long>(hr));
         report_failure();
         return;
@@ -1982,19 +2116,71 @@ void read_back_presented(ID3D12CommandQueue* queue, ID3D12Resource* surface, int
     to.PlacedFootprint = footprint;
     list->CopyTextureRegion(&to, 0, 0, 0, &from, nullptr);
     transition(list, surface, D3D12_RESOURCE_STATE_COPY_SOURCE, D3D12_RESOURCE_STATE_COMMON);
-    list->Close();
+    hr = list->Close();
+    if (FAILED(hr)) {
+        discard_recording();
+        std::snprintf(failure, sizeof(failure), "readback close failed 0x%08lx", static_cast<unsigned long>(hr));
+        report_failure();
+        return;
+    }
+    // The sample's wait event is created with the first submission that needs it, not at load.
+    if (!event) event = CreateEventW(nullptr, FALSE, FALSE, nullptr);
+    if (fence_value == UINT64_MAX - 1 || !event || !ResetEvent(event)) {
+        std::snprintf(failure, sizeof(failure), "readback fence or event unavailable");
+        report_failure();
+        return;
+    }
+    // ExecuteCommandLists does not retain the resources referenced by recorded commands.
+    surface->AddRef();
+    queue->AddRef();
+    submitted_surface = surface;
+    submitted_queue = queue;
     ID3D12CommandList* lists[] = {list};
     queue->ExecuteCommandLists(1, lists);
-    queue->Signal(fence, ++fence_value);
-    fence->SetEventOnCompletion(fence_value, event);
+    hr = queue->Signal(fence, ++fence_value);
+    if (FAILED(hr)) {
+        completion.signal_failed();
+        std::snprintf(failure, sizeof(failure), "readback fence signal failed 0x%08lx", static_cast<unsigned long>(hr));
+        report_failure();
+        return;
+    }
+    completion.submitted(fence_value);
+    hr = fence->SetEventOnCompletion(fence_value, event);
+    if (FAILED(hr)) {
+        // The submission is signalled but the sample's own event registration failed. Hand it to
+        // the drain (which registers its own event) instead of keeping the ownership unbounded.
+        drain_readback_when_complete();
+        std::snprintf(failure, sizeof(failure), "readback completion event failed 0x%08lx", static_cast<unsigned long>(hr));
+        report_failure();
+        return;
+    }
     if (WaitForSingleObject(event, 3000) != WAIT_OBJECT_0) {
+        // The fence has not reported completion to the sample. Hand the submission to the drain,
+        // which retires its ownership once the fence completes and publishes no pixels.
+        drain_readback_when_complete();
         std::snprintf(failure, sizeof(failure), "readback timed out");
+        report_failure();
+        return;
+    }
+    const auto completed = completion.retire(fence->GetCompletedValue(), release_readback_ownership);
+    if (completed != x2w_startup::FenceCompletion::completed) {
+        // A removed device cannot confirm completion: keep the ownership and disable reuse. A
+        // still-pending fence after the event was reported is drained rather than released.
+        if (completed == x2w_startup::FenceCompletion::pending) drain_readback_when_complete();
+        std::snprintf(failure, sizeof(failure), "%s",
+                      completed == x2w_startup::FenceCompletion::removed ?
+                      "readback fence reported device removal" : "readback fence incomplete after wait");
         report_failure();
         return;
     }
     void* mapped = nullptr;
     const D3D12_RANGE range{0, static_cast<SIZE_T>(total)};
-    if (FAILED(readback->Map(0, &range, &mapped))) return;
+    hr = readback->Map(0, &range, &mapped);
+    if (FAILED(hr) || !mapped) {
+        std::snprintf(failure, sizeof(failure), "readback map failed 0x%08lx", static_cast<unsigned long>(hr));
+        report_failure();
+        return;
+    }
     if (!raw) {
         AcquireSRWLockExclusive(&shown_lock);
         shown_pixels.resize(shown_width * shown_height);
@@ -2601,6 +2787,8 @@ struct Pass {
     std::uint32_t constants[16][8] = {};
     unsigned char constant_words_bound[16] = {};
     x2w_root_constants::Store compute_constants;  // compute root constants (slots 37 and 39)
+    std::array<u64, 64> compute_root_srvs{};      // title address of each compute root SRV (slot 43)
+    u64 compute_root_srv_set = 0;                 // bit per compute root parameter set by slot 43 since slot 33 / Reset
     Wrapper* compute_root_wrapper = nullptr;      // compute root signature last set by slot 33
     D3D12_VERTEX_BUFFER_VIEW vb[8] = {};
     PlacedVertexView placed_vb[8] = {};
@@ -2730,6 +2918,8 @@ void retire_drop_recording(Wrapper* list)
 void reset_list_dynamic_state(Wrapper* self)
 {
     if (!self->own().pass) return;
+    pass_of(self).compute_root_srvs.fill(0);
+    pass_of(self).compute_root_srv_set = 0;
     pass_of(self).stencil_reference = 0;
     pass_of(self).viewport_set = false;
     pass_of(self).scissor_set = false;
@@ -2837,7 +3027,11 @@ void __stdcall list_compute_root(Wrapper* self, void* root)
     Wrapper* w = as_wrapper(root);
     Pass& pass = pass_of(self);
     // A different root signature invalidates the title's cached compute root arguments.
-    if (pass.compute_root_wrapper != w) pass.compute_constants.clear();
+    if (pass.compute_root_wrapper != w) {
+        pass.compute_constants.clear();
+        pass.compute_root_srvs.fill(0);
+        pass.compute_root_srv_set = 0;
+    }
     pass.compute_root_wrapper = w;
     const bool real = w && w->own().kind == root_signature_kind && w->own().real && !root_heap_flags(w);
     pass.compute_root = real ? static_cast<ID3D12RootSignature*>(w->own().real) : nullptr;
@@ -3864,6 +4058,10 @@ void __stdcall list_compute_upload_srv(Wrapper* self, UINT parameter, UINT64 add
 {
     auto* list = recording(self);
     auto& pass = pass_of(self);
+    if (list && pass.compute_root_wrapper && parameter < pass.compute_root_srvs.size()) {
+        pass.compute_root_srvs[parameter] = address;
+        pass.compute_root_srv_set |= u64{1} << parameter;
+    }
     const auto* params = pass.compute_params;
     if (!list || !params || parameter >= params->size() || parameter >= pass.desktop_compute_upload_srvs.size() ||
         (*params)[parameter].type != D3D12_ROOT_PARAMETER_TYPE_SRV) return;
