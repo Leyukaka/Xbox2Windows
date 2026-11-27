@@ -1707,8 +1707,12 @@ struct DirectCompute {
                 const bool mask_scc = n == "s_andn2_b64" || n == "s_and_b64" || n == "s_or_b64" ||
                     n == "s_xor_b64" || n == "s_not_b64" || n == "s_wqm_b32" || n == "s_wqm_b64" ||
                     n == "s_quadmask_b32" || n == "s_quadmask_b64" ||
-                    n == "s_and_saveexec_b64" || n == "s_or_saveexec_b64";
-                const bool overwrites = mask_scc || n == "s_bcnt0_i32_b64" || n == "s_bcnt1_i32_b64" ||
+                    n == "s_and_saveexec_b64" || n == "s_or_saveexec_b64" || n == "s_xor_saveexec_b64" ||
+                    n == "s_andn2_saveexec_b64" || n == "s_orn2_saveexec_b64" ||
+                    n == "s_nand_saveexec_b64" || n == "s_nor_saveexec_b64" || n == "s_xnor_saveexec_b64";
+                const bool overwrites = mask_scc || n == "s_abs_i32" ||
+                    n == "s_bcnt0_i32_b32" || n == "s_bcnt1_i32_b32" ||
+                    n == "s_bcnt0_i32_b64" || n == "s_bcnt1_i32_b64" ||
                     inst.enc == Encoding::Sopc || n == "s_bfe_u32" || n == "s_and_b32" ||
                     n == "s_or_b32" || n == "s_max_u32" || n == "s_add_u32" || n == "s_sub_u32" ||
                     n == "s_add_i32" || n == "s_sub_i32" || n == "s_and_saveexec_b32" ||
@@ -1721,10 +1725,18 @@ struct DirectCompute {
                 const bool preserves_pair = n == "s_mul_i32" || n == "s_mul_hi_i32" || n == "s_mul_hi_u32" ||
                     n == "s_bfm_b32" || n == "s_bfm_b64" || n == "s_pack_ll_b32_b16" || n == "s_pack_lh_b32_b16" ||
                     n == "s_pack_hh_b32_b16";
+                const bool preserves_sop1 = n == "s_mov_b32" || n == "s_mov_b64" ||
+                    n == "s_brev_b32" || n == "s_brev_b64" ||
+                    n == "s_ff0_i32_b32" || n == "s_ff0_i32_b64" ||
+                    n == "s_ff1_i32_b32" || n == "s_ff1_i32_b64" ||
+                    n == "s_flbit_i32_b32" || n == "s_flbit_i32_b64" ||
+                    n == "s_flbit_i32" || n == "s_flbit_i32_i64" ||
+                    n == "s_sext_i32_i8" || n == "s_sext_i32_i16" ||
+                    n == "s_bitset0_b32" || n == "s_bitset0_b64" ||
+                    n == "s_bitset1_b32" || n == "s_bitset1_b64" || n == "s_bitreplicate_b64_b32";
                 const bool uncertain_scalar = (inst.enc == Encoding::Sopk && n != "s_movk_i32") ||
                     (inst.enc == Encoding::Sop2 && !overwrites && !preserves_pair) ||
-                    (inst.enc == Encoding::Sop1 && !overwrites && n != "s_mov_b32" && n != "s_mov_b64" &&
-                     n != "s_brev_b64" && n != "s_sext_i32_i8" && n != "s_sext_i32_i16");
+                    (inst.enc == Encoding::Sop1 && !overwrites && !preserves_sop1);
                 if (reads_scc || uncertain_scalar || (inst.branch() && (inst.op == 4 || inst.op == 5))) {
                     scc_live[j] = true;
                     pending.push_back(j);
