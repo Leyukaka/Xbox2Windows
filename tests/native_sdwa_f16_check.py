@@ -85,8 +85,8 @@ class Case:
 
     def matches(self, got):
         return (got & ~self.mask == self.want & ~self.mask and
-                fixture.same_binary16((got & self.mask) >> self.shift, (self.want & self.mask) >> self.shift,
-                                      self.op))
+                model.same_half_result((got & self.mask) >> self.shift, (self.want & self.mask) >> self.shift,
+                                       self.op))
 
 
 def cases():
@@ -107,6 +107,8 @@ def cases():
     for op in fixture.UNARY_CODE:
         items.append(Case(op, 0xc4003800, 0, WORD_1, PRESERVE, WORD_1 | ABS, 0))
         items.append(Case(op, 0x44004000, 0, WORD_0, PAD, DWORD | NEG, 0))
+    for op in ('rsq', 'log'):
+        items.append(Case(op, 0x44000000, 0, WORD_1, PAD, WORD_0 | NEG, 0))
     assert len(items) < fixture.STRIDE
     return items
 
@@ -146,8 +148,6 @@ def refusals():
         (sdwa(0x39, WORD_0, PAD, WORD_0, WORD_0), 'unimplemented direct SDWA operand profile'),  # max
         (sdwa(0x3a, WORD_0, PAD, WORD_0, WORD_0), 'unimplemented direct SDWA operand profile'),  # min
         (sdwa(0x55, WORD_0, PAD, DWORD, dst_mod=1 << 13, unary=True), dest_error),
-        (sdwa(0x56, WORD_0, PAD, WORD_0, unary=True), 'unimplemented direct SDWA operand profile'),
-        (sdwa(0x57, WORD_0, PAD, WORD_0, unary=True), 'unimplemented direct SDWA operand profile'),
     ] + [
         (sdwa(op, WORD_0, PAD, DWORD, DWORD, dst_mod=1 << modifier), dest_error)
         for op in (PKRTZ, ADD_CO_CI) for modifier in (13, 14)
@@ -239,7 +239,7 @@ def run_gpu(gpu, sdk, items, code):
                 elif shift is not None:
                     mask = 0xffff << shift
                     matches = (got & ~mask == want & ~mask and
-                               fixture.same_binary16((got & mask) >> shift, (want & mask) >> shift))
+                               model.same_half_result((got & mask) >> shift, (want & mask) >> shift))
                 else:
                     matches = got == want
                 assert matches, (index, slot, hex(got), hex(want))

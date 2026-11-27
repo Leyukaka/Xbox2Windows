@@ -1698,13 +1698,15 @@ struct DirectCompute {
             auto widen = [&](const string &bits) {
                 return ir.invoke("float", "legacyF16ToF32", 131, {{"i32", bits}}, "nounwind readnone");
             };
-            auto a = widen(half_bits(0));
+            const auto source = half_bits(0);
+            auto a = widen(source);
+            const bool rsq = n == "v_rsq_f16", log = n == "v_log_f16";
             string widened;
             if (n == "v_rcp_f16") {
                 widened = ir.value("fdiv float 1.000000e+00, " + a);
-            } else if (n == "v_sqrt_f16" || n == "v_exp_f16") {
-                widened = ir.invoke("float", "unary.f32", n == "v_sqrt_f16" ? 24 : 21,
-                                    {{"float", a}}, "nounwind readnone");
+            } else if (binary16_unary(n)) {
+                const unsigned opcode = rsq ? 25 : log ? 23 : n == "v_sqrt_f16" ? 24 : 21;
+                widened = ir.invoke("float", "unary.f32", opcode, {{"float", a}}, "nounwind readnone");
             } else {
                 auto b = widen(half_bits(1));
                 if (n == "v_subrev_f16")
@@ -1715,6 +1717,19 @@ struct DirectCompute {
             auto bits = ir.value("bitcast float " + widened + " to i32");
             // Round with the same integer nearest-even conversion v_cvt_f16_f32 uses.
             auto rounded = packed_half_rne(bits);
+            if (rsq || log) {
+                // Enforce RDNA2's exact special results from the modified half bits.
+                // The D3D Rsqrt contract does not guarantee a negative infinity for -0.
+                // Select the other special results explicitly as well.
+                const auto magnitude = ir.binary("and", source, "32767");
+                // Every encoding above +infinity is negative or a positive NaN.
+                rounded = select(cmp("ugt", source, "31744"), "32256", rounded);
+                rounded = select(cmp("eq", source, "31744"), rsq ? "0" : "31744", rounded);
+                const auto zero_result = rsq ? ir.binary("or", source, "31744") : "64512";
+                rounded = select(cmp("eq", magnitude, "0"), zero_result, rounded);
+                if (log)
+                    rounded = select(cmp("eq", source, "15360"), "0", rounded);
+            }
             // D[31:16] keeps its value: LLVM GCNSubtarget::zeroesHigh16BitsOfDest says
             // "On gfx10, all 16-bit instructions preserve the high bits", as v_cvt_f16_f32 above already does.
             vector_write(i.dst, i.subword ? place_subword(i, rounded)

@@ -56,18 +56,26 @@ def round_exact(x):
 
 
 def half_unary_value(op, x):
-    """Evaluate reciprocal, square root or exp2 in float64, including IEEE special values."""
+    """Evaluate binary16 unary operations in float64, including special values."""
     if op == 'rcp':
         return math.copysign(math.inf, x) if x == 0 else 1.0 / x
     if op == 'sqrt':
         return math.nan if x < 0 else math.sqrt(x)
+    if op == 'rsq':
+        if x == 0:
+            return math.copysign(math.inf, x)
+        return math.nan if x < 0 else 1.0 / math.sqrt(x)
+    if op == 'log':
+        if x == 0:
+            return -math.inf
+        return math.nan if x < 0 else math.log2(x)
     assert op == 'exp'
     return math.inf if x >= 128 else math.exp2(x)
 
 
 def half_op(op, a, b=0, c=0):
-    """Round one binary16 operation, including unary rcp, sqrt and exp (base two)."""
-    if op in ('rcp', 'sqrt', 'exp'):
+    """Round one binary16 operation, including unary rcp, sqrt, rsq, log2 and exp2."""
+    if op in ('rcp', 'sqrt', 'rsq', 'log', 'exp'):
         x = h2f(a)
         if op == 'rcp' and math.isfinite(x) and x != 0:
             return round_exact(1 / Fraction(x))
@@ -107,6 +115,20 @@ def half_op(op, a, b=0, c=0):
 
 def pick(word, high):
     return (word >> 16 if high else word) & 0xffff
+
+
+def same_half_result(got, want, op=None):
+    """Allow one binary16 ULP for nonzero finite exp2, rsq and log2 results.
+
+    Match NaNs by class and zeros and infinities exactly.
+    """
+    if got >> 16 or want >> 16:
+        return False
+    if is_nan(got) or is_nan(want):
+        return is_nan(got) and is_nan(want)
+    if op in ('exp', 'rsq', 'log') and 0 < (got & 0x7fff) < 0x7c00 and 0 < (want & 0x7fff) < 0x7c00:
+        return abs(got - want) <= 1
+    return got == want
 
 
 def packed(op, words, op_sel, op_sel_hi):

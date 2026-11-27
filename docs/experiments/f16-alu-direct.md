@@ -1,19 +1,23 @@
 # Binary16 arithmetic in the direct compute path
 
-The direct C++ compute frontend supports VOP2 and VOP3 `v_add_f16`, `v_sub_f16`, `v_subrev_f16` and `v_mul_f16`, plus VOP1 and VOP3 `v_rcp_f16`, `v_sqrt_f16` and `v_exp_f16`. All seven operations support SDWA. Graphics programs keep the generic direct-lowering refusal.
+The direct C++ compute frontend supports VOP2 and VOP3 `v_add_f16`, `v_sub_f16`, `v_subrev_f16` and `v_mul_f16`, plus VOP1 and VOP3 `v_rcp_f16`, `v_sqrt_f16`, `v_rsq_f16`, `v_log_f16` and `v_exp_f16`. All nine operations support SDWA. Graphics programs keep the generic direct-lowering refusal.
 
 ## Semantics
 
 - Each source is its low 16 bits by default. An inline float uses the binary16 rounding of that f32 value. An integer inline or a literal uses its low 16 bits. SDWA accepts WORD_0, WORD_1 or DWORD (low half).
 - abs clears bit 15 of the half, then neg toggles it.
 - The operation is an f32 add, sub or mul. An f32 value has a 24-bit significand, which covers a correctly rounded binary16 add, sub or mul.
-- Reciprocal computes `1.0 / x` in f32. Square root and base-two exponentiation use DXIL Sqrt (24) and Exp (21).
-- Reciprocal exchanges signed zeros and signed infinities. Square root preserves signed zero and produces NaN for negative nonzero inputs. Exp returns 1 for either signed zero, infinity at and above 16, and positive zero at and below -25 after binary16 rounding.
+- Reciprocal computes `1.0 / x` in f32. The other unary operations use DXIL Sqrt (24), Rsqrt (25), Log (23, base two) and Exp (21).
+- Reciprocal exchanges signed zeros and signed infinities. Square root preserves signed zero and produces NaN for negative nonzero inputs. Exp returns 1 for either signed zero, infinity at and above 16, and positive zero at and below -25 (the exact tie at -25 is checked in the CPU model only, since an Exp one f32 ULP high rounds it to the smallest denormal) after binary16 rounding.
 - The result is rounded with the same integer round-to-nearest-even conversion `v_cvt_f16_f32` uses. The low 16 bits are written and the high half is preserved. SDWA writes the selected half and pads or preserves the other half.
+- Rsq maps +0 to +infinity, -0 to -infinity and +infinity to +0. Log maps either signed zero to -infinity, +infinity to +infinity and 1 to +0. Both return a quiet NaN for NaN and negative nonzero inputs, including -infinity.
+- The emitter selects these results using the binary16 source bits after abs and neg. D3D Rsqrt does not guarantee -infinity for -0, so the rsq zero result takes its sign directly from the source.
 - `v_subrev_f16` subtracts the first source from the second.
 - DPP16 VOP2 permutes the full src0 VGPR word before selecting its low half and honors FI, BOUND_CTRL, and row and bank write masks.
 
-The reference is `half_op` in [`tests/f16_packed_model.py`](../../tests/f16_packed_model.py). Reciprocal uses exact rational rounding and square root uses float64 before binary16 rounding. Both are compared bit for bit. Nonzero finite exp2 results allow one binary16 ULP, and zeros and infinities match exactly. NaN results match by class. The checks are [`tests/native_f16_alu_check.py`](../../tests/native_f16_alu_check.py) and [`tests/native_sdwa_f16_check.py`](../../tests/native_sdwa_f16_check.py).
+The reference is `half_op` in [`tests/f16_packed_model.py`](../../tests/f16_packed_model.py). Reciprocal uses exact rational rounding. Square root, reciprocal square root, log2 and exp2 use float64 before binary16 rounding. Nonzero finite exp2, rsq and log2 results allow one binary16 ULP. Other numeric results match exactly, including signed zeros and infinities. NaN results match by class.
+
+The [plain-form fixture](../../tests/native_f16_alu_check.py) covers signed zeros and infinities, quiet and signaling NaNs, negative finite values, subnormals, 1, powers of two and general values. Its IR interpreter models Rsqrt returning +infinity for -0 to exercise the sign fix. The [SDWA fixture](../../tests/native_sdwa_f16_check.py) exercises source selection and modifiers, destination padding and preservation, and negation of +0 before rsq and log.
 
 ## Refused forms
 
@@ -29,7 +33,7 @@ Each of these is a named diagnostic:
 
 `s_round_mode` and `s_denorm_mode` that leave the f16 fields at that contract, and that leave the f32 fields unchanged, are accepted. A write that changes an f32 rounding or denormal field keeps the previous control-instruction refusal. A guest branch together with a MODE write makes the contract unprovable and is refused with the rounding diagnostic.
 
-For the plain scalar-half forms, fma, fmac, fmamk, fmaak, min, max, ldexp, the min3/max3/med3 forms, div_fixup and the VOP1 ops other than rcp, sqrt and exp (rsq, log and the rest) stay on the generic direct-lowering diagnostic. The fixture checks `v_fmac_f16`, `v_min_f16`, `v_rsq_f16` and `v_log_f16`. VOP3P arithmetic has a [separate experiment](native-packed-f16.md).
+For the plain scalar-half forms, fma, fmac, fmamk, fmaak, min, max, ldexp, the min3/max3/med3 forms, div_fixup and the VOP1 ops other than rcp, sqrt, exp, rsq and log stay on the generic direct-lowering diagnostic. The fixture checks `v_fmac_f16` and `v_min_f16`. VOP3P arithmetic has a [separate experiment](native-packed-f16.md).
 
 ## Linux
 
