@@ -2002,7 +2002,8 @@ struct DirectCompute {
             return i.subword && j < 2 ? subword(value, i.src_select[j], i.src_sext[j]) : value;
         };
         if (n == "s_mov_b32" || n == "s_mov_b64") {
-            if (i.dst > 106 && i.dst != 126 && !(compute && i.dst == 107) && !(wave64 && i.dst == 127))
+            const bool exec_hi = i.dst == 127 && (wave64 || (compute && n == "s_mov_b32"));
+            if (i.dst > 106 && i.dst != 126 && !(compute && i.dst == 107) && !exec_hi)
                 refuse(i.pc, "direct scalar move destination");
             if (i.src[0] <= 105 && !state[i.src[0]].numeric()) {
                 if (i.dst > 105)
