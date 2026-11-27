@@ -1353,8 +1353,6 @@ struct DirectCompute {
             // existing refusal; this lowering is the direct compute path.
             if (graphics_input)
                 return false;
-            if (i.dpp_control || permuted)
-                refuse(i.pc, "unsupported " + string(n) + " DPP form");
             if (i.clamp || i.scale)
                 refuse(i.pc, "unsupported " + string(n) + " clamp or omod");
             // op_sel bits 11..14 select a high half. Bit 15 is clamp, already refused.
@@ -1365,7 +1363,9 @@ struct DirectCompute {
             auto half_bits = [&](unsigned j) {
                 const unsigned r = i.src[j];
                 string bits;
-                if (i.subword) {
+                if (!j && permuted) {
+                    bits = ir.binary("and", *permuted, "65535");
+                } else if (i.subword) {
                     // A DWORD selection reads the low half for binary16 arithmetic.
                     const unsigned sel = i.src_select[j];
                     bits = subword(operand32(i, r), sel == 6 ? 4 : sel, false);
@@ -3044,7 +3044,7 @@ struct DirectCompute {
                               : mask ? "DPP mirror needs complete source lane groups"
                               : "DPP quad_perm needs a thread count divisible by four");
         const auto rule = alu_rules.find(i.name);
-        if (rule == alu_rules.end() || rule->second.arity > 2)
+        if (!binary16_alu(i.name) && (rule == alu_rules.end() || rule->second.arity > 2))
             refuse(i.pc, "unsupported DPP arithmetic");
         if (i.enc == Encoding::Vop1 && ((i.neg | i.abs) & 2))
             refuse(i.pc, "unexpected second DPP source modifier");
@@ -3070,20 +3070,34 @@ struct DirectCompute {
         }
         auto src = operand32(i, i.src[0]);
         auto word = ir.invoke("i32", "waveReadLaneAt.i32", 117, {{"i32",src},{"i32",source_lane}}, "nounwind");
-        string previous;
         if (!i.dpp_fetch_inactive) {
             auto exec = wave64 ? select(upper_half, read(127), read(126)) : read(126);
             auto source_enabled = cmp("ne", ir.binary("and", exec, ir.binary("shl", "1", source_lane)), "0");
             source_usable = source_usable.empty() ? source_enabled
                           : ir.value("and i1 " + source_usable + ", " + source_enabled);
         }
+        string write_enabled;
         if (!source_usable.empty()) {
             if (i.dpp_bound_zero) word = select(source_usable, word, "0");
-            else previous = read(i.dst);
+            else write_enabled = source_usable;
         }
+        // Row and bank masks gate destination writes independently of the source and BOUND_CTRL.
+        auto apply_mask = [&](unsigned mask, const string &index) {
+            auto enabled = cmp("ne", ir.binary("and", to_string(mask), ir.binary("shl", "1", index)), "0");
+            write_enabled = write_enabled.empty() ? enabled : ir.value("and i1 " + write_enabled + ", " + enabled);
+        };
+        if (i.dpp_row_mask != 15) {
+            auto row_index = ir.binary("lshr", lane, "4");
+            if (wave64) row_index = ir.binary("or", row_index, select(upper_half, "2", "0"));
+            apply_mask(i.dpp_row_mask, row_index);
+        }
+        if (i.dpp_bank_mask != 15)
+            apply_mask(i.dpp_bank_mask, ir.binary("and", ir.binary("lshr", lane, "2"), "3"));
+        string previous;
+        if (!write_enabled.empty()) previous = read(i.dst);
         arithmetic(i, state, &word);
         if (!previous.empty())
-            write(i.dst, select(source_usable, read(i.dst), previous));
+            write(i.dst, select(write_enabled, read(i.dst), previous));
     }
     // Returns true when the instruction is a MODE write this path has accepted
     // (including a no-op that leaves the implemented contract in place).
