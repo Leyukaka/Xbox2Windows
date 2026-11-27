@@ -2033,21 +2033,34 @@ struct DirectCompute {
             vector_write(i.dst, place_subword(i, z));
     }
     void lower_dpp(const Inst &i, const State &state, unsigned threads) {
-        // Both lane selections stay in one physical wave32 for split guest wave64.
+        // All lane selections stay in one physical wave32 for split guest wave64.
         // Shader control flow stays wave-uniform. Guest EXEC predicates VGPR
         // writes, so FI can fetch the last VGPR value from a disabled thread.
         const unsigned mask = i.mirror_mask();
-        const unsigned group_size = mask ? mask + 1 : 4;
+        const auto row = i.dpp_row();
+        const bool row_op = row.op != Inst::DppRowOp::None;
+        const unsigned group_size = row_op ? 16 : mask ? mask + 1 : 4;
         if (threads % group_size)
-            refuse(i.pc, mask ? "DPP mirror needs complete source lane groups"
+            refuse(i.pc, row_op ? "DPP row shift or rotate needs a thread count divisible by 16"
+                              : mask ? "DPP mirror needs complete source lane groups"
                               : "DPP quad_perm needs a thread count divisible by four");
         const auto rule = alu_rules.find(i.name);
         if (rule == alu_rules.end() || rule->second.arity > 2)
             refuse(i.pc, "unsupported DPP arithmetic");
         if (i.enc == Encoding::Vop1 && ((i.neg | i.abs) & 2))
             refuse(i.pc, "unexpected second DPP source modifier");
-        string source_lane;
-        if (mask)
+        string source_lane, source_usable;
+        if (row_op) {
+            auto row_base = ir.binary("and", lane, "4294967280");
+            auto row_lane = ir.binary("and", lane, "15");
+            auto amount = to_string(row.amount);
+            const bool shl = row.op == Inst::DppRowOp::Shl;
+            auto peer = ir.binary(shl ? "add" : "sub", row_lane, amount);
+            if (row.op != Inst::DppRowOp::Ror)
+                source_usable = cmp("ult", peer, "16");
+            // Keep the physical lane index safe even when the shift is out of row.
+            source_lane = ir.binary("or", row_base, ir.binary("and", peer, "15"));
+        } else if (mask)
             source_lane = ir.binary("xor", lane, to_string(mask));
         else {
             auto quad_base = ir.binary("and", lane, "4294967292");
@@ -2058,16 +2071,20 @@ struct DirectCompute {
         }
         auto src = operand32(i, i.src[0]);
         auto word = ir.invoke("i32", "waveReadLaneAt.i32", 117, {{"i32",src},{"i32",source_lane}}, "nounwind");
-        string source_enabled, previous;
+        string previous;
         if (!i.dpp_fetch_inactive) {
             auto exec = wave64 ? select(upper_half, read(127), read(126)) : read(126);
-            source_enabled = cmp("ne", ir.binary("and", exec, ir.binary("shl", "1", source_lane)), "0");
-            if (i.dpp_bound_zero) word = select(source_enabled, word, "0");
+            auto source_enabled = cmp("ne", ir.binary("and", exec, ir.binary("shl", "1", source_lane)), "0");
+            source_usable = source_usable.empty() ? source_enabled
+                          : ir.value("and i1 " + source_usable + ", " + source_enabled);
+        }
+        if (!source_usable.empty()) {
+            if (i.dpp_bound_zero) word = select(source_usable, word, "0");
             else previous = read(i.dst);
         }
         arithmetic(i, state, &word);
         if (!previous.empty())
-            write(i.dst, select(source_enabled, read(i.dst), previous));
+            write(i.dst, select(source_usable, read(i.dst), previous));
     }
     // Returns true when the instruction is a MODE write this path has accepted
     // (including a no-op that leaves the implemented contract in place).
