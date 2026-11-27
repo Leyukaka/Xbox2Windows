@@ -2383,8 +2383,8 @@ struct DirectCompute {
             return;
         }
         if (n == "s_bitreplicate_b64_b32") {
-            if ((i.dst > 104 && (graphics_input || i.dst != 106)) || (i.dst & 1))
-                refuse(i.pc, "bitreplicate requires an aligned general scalar pair or compute VCC");
+            if ((i.dst > 104 && (graphics_input || (i.dst != 106 && i.dst != 126))) || (i.dst & 1))
+                refuse(i.pc, "bitreplicate requires an aligned general scalar pair or compute VCC/EXEC");
             // pixel_aot expands each 16-bit half into the even positions,
             // then duplicates each of the original bits into its neighbour.
             auto replicate = [&](string half) {
