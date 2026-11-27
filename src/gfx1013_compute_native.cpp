@@ -87,6 +87,10 @@ struct Inst {
     }
     unsigned target() const { return next + 4 * static_cast<int16_t>(a & 65535); }
 };
+unsigned memory_count(const Inst &i) { return 1u << (i.op & 7); }
+// Wave32 compute can use both VCC words as scalar data.
+unsigned smem_sgpr_limit(bool wave32_compute) { return wave32_compute ? 108 : 106; }
+
 Inst decode(const string &bytes, unsigned pc,bool direct=false, bool graphics=false, bool wave64=false) {
     const auto encoded=gfx1013::instruction(bytes,pc);
     Inst i;
@@ -159,9 +163,12 @@ Inst decode(const string &bytes, unsigned pc,bool direct=false, bool graphics=fa
         i.dst = (a >> 6) & 127;
         i.src[0] = (a & 63) * 2;
         const unsigned soffset = i.b >> 25;
+        const unsigned limit = smem_sgpr_limit(direct && !graphics && !wave64);
         if ((i.b & 0x01f00000u) || (a & 0x14000) || (i.op & ~8u) > 4 ||
-            (soffset != 125 && ((!direct && i.op < 8 && i.op != 2) || soffset > 105)))
+            (soffset != 125 && ((!direct && i.op < 8 && i.op != 2) || soffset >= limit)))
             refuse(pc, "unsupported scalar memory addressing");
+        if (direct && !graphics && i.dst + memory_count(i) > limit)
+            refuse(pc, "unsupported scalar memory destination range");
         i.name = "smem";
     } else if ((a & 0xfc000000u) == 0xf0000000) {
         i.enc = Encoding::Image;
@@ -454,7 +461,6 @@ Symbol source(const Inst &i, unsigned code, const State &s) {
         return {Symbol::Type::constant, i.literal};
     return {};
 }
-unsigned memory_count(const Inst &i) { return 1u << (i.op & 7); }
 // Derive the rewritten byte-address V# symbolically. Each field carries its
 // source table/slot identity. Numeric consumption still requires real bits.
 // heap_window: the direct path under HeapViewContract::raw_buffer also rewrites a
@@ -515,7 +521,7 @@ State transfer(const Inst &i, State s, bool wave64, bool graphics, bool heap_win
     } else if (i.enc == Encoding::Smem) {
         auto base = s[i.src[0]];
         const unsigned offset_reg = i.b >> 25;
-        const Symbol index = offset_reg <= 105 ? s[offset_reg] : Symbol{};
+        const Symbol index = offset_reg < smem_sgpr_limit(!graphics && !wave64) ? s[offset_reg] : Symbol{};
         unsigned n = memory_count(i);
         for (unsigned j = 0; j < n; ++j) {
             Symbol v{};
@@ -940,8 +946,8 @@ struct Emit {
                 body << "if(active) " << reg(256 + dst++) << "=asuint(t." << "xyzw"[k] << ");\n";
             }
     }
-    void require_numeric(const Inst &i, unsigned reg) const {
-        if (reg <= 105 && !program.before[program.at.at(i.pc)][reg].numeric())
+    void require_numeric(const Inst &i, unsigned reg, unsigned limit = 106) const {
+        if (reg < limit && !program.before[program.at.at(i.pc)][reg].numeric())
             refuse(i.pc, "unbound numeric SGPR s" + to_string(reg));
     }
     void scalar(const Inst &i) {

@@ -125,11 +125,11 @@ struct DirectCompute {
         } else
             write(r, select(graphics_input ? graphics_predicate : active(), value, read(r)));
     }
-    string operand32(const Inst &i, unsigned n) {
+    string operand32(const Inst &i, unsigned n, unsigned sgpr_limit = 106) {
         if (graphics_input && n == 106)
             refuse(i.pc, "graphics instruction consumes a full wave mask");
         if (n <= 106 || n == 126 || n == 127 || (!graphics_input && n == 107) || (n >= 256 && n < 512)) {
-            analysis.require_numeric(i, n);
+            analysis.require_numeric(i, n, sgpr_limit);
             return read(n);
         }
         if (n == 253)
@@ -488,6 +488,7 @@ struct DirectCompute {
         }
         if (i.enc == Encoding::Smem) {
             unsigned so = i.b >> 25;
+            const unsigned limit = smem_sgpr_limit(!graphics_input && !wave64);
             const auto &low = s.at(i.src[0]);
             const bool root = low.type == Symbol::Type::root_address;
             if (!root && low.type == Symbol::Type::table && low.value == compute_resource_heap) {
@@ -509,9 +510,9 @@ struct DirectCompute {
                     s.at(i.src[0] + 1).type != Symbol::Type::constant || s.at(i.src[0] + 1).value != 0)
                     refuse(i.pc, "direct descriptor address outside bound table");
                 if (so != 125) {
-                    if (i.op != 2 || so > 105)
+                    if (i.op != 2 || so >= limit)
                         refuse(i.pc, "direct indexed descriptor load shape");
-                    auto index = ir.binary("lshr", operand32(i, so), "5");
+                    auto index = ir.binary("lshr", operand32(i, so, limit), "5");
                     for (unsigned j = 0; j < 4; ++j)
                         write(i.dst + j, index);
                 }
@@ -532,7 +533,7 @@ struct DirectCompute {
                               !(s.at(i.src[0] + 3) == Symbol{Symbol::Type::constant, 0x31016fac})))
                     refuse(i.pc, "unsupported synthesized scalar buffer descriptor fields");
                 unsigned span = off + 4 * n;
-                if (off % 4 || span > 65536 || i.dst + n > 106)
+                if (off % 4 || span > 65536 || i.dst + n > limit)
                     refuse(i.pc, "unsupported root descriptor load range");
                 if (so != 125) {
                     const auto &index = s.at(so);
@@ -557,7 +558,7 @@ struct DirectCompute {
             } else
                 h = resource(i, s, i.src[0], ComputeViewKind::buffer_srv, so == 125 ? off + 4 * n : 4);
             auto addr = so == 125 ? to_string(off)
-                                  : ir.binary("and", ir.binary("add", operand32(i, so), to_string(off)), "4294967292");
+                                  : ir.binary("and", ir.binary("add", operand32(i, so, limit), to_string(off)), "4294967292");
             for (unsigned j = 0; j < n; j += 4) {
                 unsigned width = (std::min)(4u, n - j);
                 auto chunk = so == 125 ? to_string(off + j * 4) :
