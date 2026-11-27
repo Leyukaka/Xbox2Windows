@@ -70,6 +70,8 @@ local second operand. A sparse EXEC mask distinguishes fetching an inactive
 source, supplying zero and retaining the destination. The test checks both
 workgroups and the surrounding buffer guards.
 
+Wave32 direct compute lowers `s_or_saveexec_b32`. As with `s_mov_b32 exec_lo`, EXEC keeps bits past the group; a lane runs only if its own bit is set.
+
 The pixel fixture opens EXEC to all lanes, seeds a guest register with scalar
 lane writes and reads back lanes in each half of a guest wave64. The compiler
 can track those words independently of the desktop rasterizer's choice of

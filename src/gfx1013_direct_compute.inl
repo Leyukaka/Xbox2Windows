@@ -2027,7 +2027,7 @@ struct DirectCompute {
                     inst.enc == Encoding::Sopc || n == "s_bfe_u32" || n == "s_and_b32" ||
                     n == "s_or_b32" || n == "s_max_u32" || n == "s_add_u32" || n == "s_sub_u32" ||
                     n == "s_add_i32" || n == "s_sub_i32" || n == "s_and_saveexec_b32" ||
-                    n == "s_andn2_wrexec_b32" || n == "s_andn2_b32" || n == "s_orn2_b32" ||
+                    n == "s_or_saveexec_b32" || n == "s_andn2_wrexec_b32" || n == "s_andn2_b32" || n == "s_orn2_b32" ||
                     n == "s_nor_b32" || n == "s_nand_b32" || n == "s_xnor_b32" || n == "s_not_b32" ||
                     n == "s_lshr_b32" || n == "s_lshl_b32" || n == "s_ashr_i32" ||
                     n == "s_lshl_b64" || n == "s_lshr_b64" || n == "s_ashr_i64" || n == "s_xor_b32" ||
@@ -2980,10 +2980,15 @@ struct DirectCompute {
             write(128, ir.value("zext i1 " + cmp("ne", ir.binary("or", lo, hi), "0") + " to i32"));
             return;
         }
-        if (n == "s_and_saveexec_b32" || n == "s_andn2_wrexec_b32") {
+        const bool or_saveexec = n == "s_or_saveexec_b32" && compute && !wave64;
+        if (or_saveexec || n == "s_and_saveexec_b32" || n == "s_andn2_wrexec_b32") {
+            const bool save = n != "s_andn2_wrexec_b32";
+            if (or_saveexec && i.dst > 107)
+                refuse(i.pc, "unsupported wave32 SAVEEXEC destination");
             auto old = read(126);
-            auto mask = ir.binary("and", a, n == "s_and_saveexec_b32" ? old : ir.binary("xor", old, "4294967295"));
-            write(i.dst, n == "s_and_saveexec_b32" ? old : mask);
+            // Like s_mov_b32 exec_lo, EXEC keeps every bit; a lane runs only if its own bit is set.
+            auto mask = ir.binary(or_saveexec ? "or" : "and", a, save ? old : ir.binary("xor", old, "4294967295"));
+            write(i.dst, save ? old : mask);
             write(126, mask);
             write(128, ir.value("zext i1 " + cmp("ne", mask, "0") + " to i32"));
             return;
