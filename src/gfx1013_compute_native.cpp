@@ -201,8 +201,16 @@ Inst decode(const string &bytes, unsigned pc,bool direct=false, bool graphics=fa
                 refuse(pc, "raw store needs a linear byte offset");
             i.name = "buffer_store_raw";
         } else if (i.op >= 0x0c && i.op <= 0x0f) {
-            if ((a & 0x0203f000u) != 0x1000u || (i.b & 0xffe00000u) != 0x80000000u)
+            if (direct && !graphics) {
+                if ((a & 0x0203e000u) || (i.b & 0x00e00000u))
+                    refuse(pc, "raw buffer load needs a linear byte offset and no modifiers");
+                // The MUBUF encoding has no trailing literal word.
+                const unsigned soffset = i.b >> 24;
+                if (soffset > 105 && !(soffset >= 128 && soffset <= 208))
+                    refuse(pc, "raw buffer load scalar offset needs an SGPR or inline integer");
+            } else if ((a & 0x0203f000u) != 0x1000u || (i.b & 0xffe00000u) != 0x80000000u) {
                 refuse(pc, "raw buffer load needs offen with zero scalar offset and no modifiers");
+            }
             i.name = "buffer_load_dword";
         } else {
             if (i.op > 3)
