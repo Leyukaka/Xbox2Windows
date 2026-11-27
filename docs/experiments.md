@@ -2,6 +2,17 @@
 
 New notes go in `docs/experiments/<topic>.md` (see [the folder guide](experiments/README.md)); this file keeps the older notes.
 
+## Plain binary16 arithmetic in direct compute
+
+VOP2 and VOP3 add, sub, subrev and mul use binary32 arithmetic and an integer nearest-even conversion back
+to binary16. [Plain-form experiment](experiments/f16-alu-direct.md)
+
+## SDWA binary16 arithmetic in direct compute
+
+The same four operations accept VGPR half selection, input abs and neg, and half-word destination placement
+with pad or preserve. The readback fixture checks both halves and untouched buffer guards.
+[SDWA experiment](experiments/native-sdwa-f16.md)
+
 ## Guest logical 64-bit shift sources in direct compute
 
 Logical 64-bit shifts accept sign-extended inline integers, zero-extended

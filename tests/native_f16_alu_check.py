@@ -253,7 +253,6 @@ def refusal_programs():
     add = vop2(0x32, 3, 257, 2)
     programs = []
     for name, op in OP_CODE.items():
-        programs.append((vop2(op, 3, 249, 2) + [0, 0xbf810000], 'unsupported v_%s_f16 SDWA form' % name))
         programs.append((vop2(op, 3, 250, 2) + [0, 0xbf810000], 'unsupported v_%s_f16 DPP form' % name))
     programs.append((vop3(0x35, 3, 257, 258, clamp=1) + [0xbf810000], 'unsupported v_mul_f16 clamp or omod'))
     programs.append((vop3(0x33, 3, 257, 258, omod=1) + [0xbf810000], 'unsupported v_sub_f16 clamp or omod'))

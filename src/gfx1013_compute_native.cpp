@@ -247,14 +247,9 @@ Inst decode(const string &bytes, unsigned pc,bool direct=false, bool graphics=fa
     } else
         refuse(pc, "unsupported instruction " + string(encoded.name) + " " + hexword(a));
     if (!i.wide && (i.enc == Encoding::Vop1 || i.enc == Encoding::Vop2 || i.enc == Encoding::Vopc)) {
-        // These four binary16 ops are not in the admitted SDWA/DPP sets below.
-        // Name the form before that path reports a generic operand-profile refusal.
-        if (direct && !graphics && binary16_alu(encoded.name)) {
-            if (i.src[0] == 249)
-                refuse(pc, "unsupported " + string(encoded.name) + " SDWA form");
-            if (i.src[0] == 250)
-                refuse(pc, "unsupported " + string(encoded.name) + " DPP form");
-        }
+        const bool half_alu = !graphics && i.enc == Encoding::Vop2 && binary16_alu(encoded.name);
+        if (direct && half_alu && i.src[0] == 250)
+            refuse(pc, "unsupported " + string(encoded.name) + " DPP form");
         const bool sdwa_logic = i.enc == Encoding::Vop2 && i.op == 0x1d;
         const bool sdwa_class = i.enc == Encoding::Vopc && i.op == 0x88;
         const bool sdwa_compare = i.enc == Encoding::Vopc && !sdwa_class;
@@ -271,7 +266,7 @@ Inst decode(const string &bytes, unsigned pc,bool direct=false, bool graphics=fa
                 "v_floor_f32", "v_ceil_f32", "v_fract_f32", "v_trunc_f32", "v_rndne_f32",
                 "v_exp_f32", "v_log_f32", "v_rcp_f32", "v_rsq_f32", "v_sqrt_f32"};
             const auto name = encoded.name;
-            const bool fp_input = floats.count(name) || name == "v_cvt_u32_f32" || name == "v_cvt_i32_f32" ||
+            const bool fp_input = half_alu || floats.count(name) || name == "v_cvt_u32_f32" || name == "v_cvt_i32_f32" ||
                                   name == "v_cvt_f16_f32" || name == "v_cvt_f32_f16" ||
                                   (sdwa_compare && (name.substr(name.size()-4) == "_f32" || name.substr(name.size()-4) == "_f16"));
             const bool conversion = name == "v_cvt_f32_i32" || name == "v_cvt_f32_u32" ||
@@ -289,6 +284,9 @@ Inst decode(const string &bytes, unsigned pc,bool direct=false, bool graphics=fa
                 i.dst_unused = (ext >> 11) & 3;
                 i.scale = (ext >> 14) & 3;
                 i.clamp = (ext & (1u << 13)) != 0;
+                if (half_alu && ((i.dst_select != 4 && i.dst_select != 5) ||
+                                 (i.dst_unused != 0 && i.dst_unused != 2)))
+                    refuse(pc, "unsupported SDWA destination modifier");
                 if (i.dst_select == 7 || i.dst_unused == 3 || ((i.clamp || i.scale) && !floats.count(name) && !conversion) ||
                     (sources == 1 && (ext & 0xbf000000u)))
                     refuse(pc, "unsupported SDWA destination modifier");
@@ -297,6 +295,10 @@ Inst decode(const string &bytes, unsigned pc,bool direct=false, bool graphics=fa
                 const unsigned control = (ext >> (16 + 8*j)) & 255;
                 i.src_select[j] = control & 7;
                 i.src_sext[j] = (control & 8) != 0;
+                if (half_alu && (control & 128))
+                    refuse(pc, "SDWA binary16 source must be a VGPR");
+                if (half_alu && i.src_select[j] < 4)
+                    refuse(pc, "invalid SDWA source modifier");
                 if (i.src_select[j] == 7 || (control & 64) || (fp_input && i.src_sext[j]) || (!fp_input && (control & 0x30)))
                     refuse(pc, "invalid SDWA source modifier");
                 i.abs |= ((control >> 5) & 1) << j;

@@ -985,8 +985,8 @@ struct DirectCompute {
             // existing refusal; this lowering is the direct compute path.
             if (graphics_input)
                 return false;
-            if (i.subword || i.dpp_control || permuted)
-                refuse(i.pc, "unsupported " + string(n) + (i.subword ? " SDWA form" : " DPP form"));
+            if (i.dpp_control || permuted)
+                refuse(i.pc, "unsupported " + string(n) + " DPP form");
             if (i.clamp || i.scale)
                 refuse(i.pc, "unsupported " + string(n) + " clamp or omod");
             // op_sel bits 11..14 select a high half. Bit 15 is clamp, already refused.
@@ -997,7 +997,11 @@ struct DirectCompute {
             auto half_bits = [&](unsigned j) {
                 const unsigned r = i.src[j];
                 string bits;
-                if (r >= 240 && r <= 248) {
+                if (i.subword) {
+                    // A DWORD selection reads the low half for binary16 arithmetic.
+                    const unsigned sel = i.src_select[j];
+                    bits = subword(operand32(i, r), sel == 6 ? 4 : sel, false);
+                } else if (r >= 240 && r <= 248) {
                     // Inline floats are f32 patterns. The f16 operation consumes the
                     // binary16 rounding of that value.
                     constexpr unsigned halves[]{0x3800, 0xb800, 0x3c00, 0xbc00, 0x4000,
@@ -1029,9 +1033,9 @@ struct DirectCompute {
             auto bits = ir.value("bitcast float " + widened + " to i32");
             // f32 has a 24-bit significand, which covers a correctly rounded f16
             // add, sub or mul (2*11+2). Round with the same integer nearest-even
-            // conversion v_cvt_f16_f32 uses. The low 16 bits are the result and
-            // the high half is zero, matching RDNA 2.
-            vector_write(i.dst, ir.binary("and", packed_half_rne(bits), "65535"));
+            // conversion v_cvt_f16_f32 uses.
+            auto rounded = packed_half_rne(bits);
+            vector_write(i.dst, i.subword ? place_subword(i, rounded) : ir.binary("and", rounded, "65535"));
             return true;
         }
         const auto rule = alu_rules.find(n);

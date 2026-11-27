@@ -14,9 +14,10 @@ The bit-exact reference is `half_op` in [`tests/f16_packed_model.py`](../../test
 
 ## Refused forms
 
+The SDWA operand profile is covered by the [SDWA experiment](native-sdwa-f16.md).
+
 Each of these is a named diagnostic:
 
-- SDWA
 - DPP
 - clamp or omod
 - a high-half `op_sel` (instruction bits 11 through 14)
