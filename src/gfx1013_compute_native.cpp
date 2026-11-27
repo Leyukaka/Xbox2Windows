@@ -29,6 +29,10 @@ static bool binary16_alu(std::string_view name) {
     return name == "v_add_f16" || name == "v_sub_f16" || name == "v_subrev_f16" || name == "v_mul_f16";
 }
 
+static bool binary16_unary(std::string_view name) {
+    return name == "v_rcp_f16" || name == "v_sqrt_f16" || name == "v_exp_f16";
+}
+
 [[noreturn]] void refuse(unsigned pc, const string &reason) {
     std::ostringstream out;
     out << "native compute +0x" << std::hex << pc << ": " << reason;
@@ -287,9 +291,10 @@ Inst decode(const string &bytes, unsigned pc,bool direct=false, bool graphics=fa
     } else
         refuse(pc, "unsupported instruction " + string(encoded.name) + " " + hexword(a));
     if (!i.wide && (i.enc == Encoding::Vop1 || i.enc == Encoding::Vop2 || i.enc == Encoding::Vopc)) {
-        const bool half_alu = !graphics && i.enc == Encoding::Vop2 && binary16_alu(encoded.name);
+        const bool half_alu = !graphics && ((i.enc == Encoding::Vop2 && binary16_alu(encoded.name)) ||
+                                           (i.enc == Encoding::Vop1 && binary16_unary(encoded.name)));
         const bool dpp8 = i.src[0] == 233 || i.src[0] == 234;
-        if (direct && half_alu && dpp8)
+        if (direct && half_alu && (dpp8 || (i.enc == Encoding::Vop1 && i.src[0] == 250)))
             refuse(pc, "unsupported " + string(encoded.name) + " DPP form");
         const bool sdwa_logic = i.enc == Encoding::Vop2 && i.op == 0x1d;
         const bool sdwa_class = i.enc == Encoding::Vopc && i.op == 0x88;

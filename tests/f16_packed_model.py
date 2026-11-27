@@ -55,8 +55,28 @@ def round_exact(x):
     return neg | (n if e == -14 and n < 0x400 else ((e + 15) << 10) | (n & 0x3ff))
 
 
-def half_op(op, a, b, c=0):
-    """One binary16 lane: op is 'mul', 'add' or 'fma' (a * b + c)."""
+def half_unary_value(op, x):
+    """Evaluate reciprocal, square root or exp2 in float64, including IEEE special values."""
+    if op == 'rcp':
+        return math.copysign(math.inf, x) if x == 0 else 1.0 / x
+    if op == 'sqrt':
+        return math.nan if x < 0 else math.sqrt(x)
+    assert op == 'exp'
+    return math.inf if x >= 128 else math.exp2(x)
+
+
+def half_op(op, a, b=0, c=0):
+    """Round one binary16 operation, including unary rcp, sqrt and exp (base two)."""
+    if op in ('rcp', 'sqrt', 'exp'):
+        x = h2f(a)
+        if op == 'rcp' and math.isfinite(x) and x != 0:
+            return round_exact(1 / Fraction(x))
+        value = half_unary_value(op, x)
+        if math.isnan(value):
+            return 0x7e00
+        if value == 0 or math.isinf(value):
+            return struct.unpack('<H', struct.pack('<e', value))[0]
+        return round_exact(Fraction(value))
     words = (a, b, c) if op == 'fma' else (a, b)
     if any(is_nan(w) for w in words):
         return 0x7e00

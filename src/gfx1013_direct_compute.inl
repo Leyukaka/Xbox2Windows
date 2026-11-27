@@ -22,7 +22,7 @@ struct DirectCompute {
     HeapViewContract heap_view = HeapViewContract::none;
     // heap_view is raw_buffer and the path is direct: the byte-address rewrite of a heap descriptor is tracked.
     bool heap_window = false;
-    // Binary16 add, sub, subrev and mul are lowered only while MODE stays at
+    // Binary16 arithmetic is lowered only while MODE stays at
     // the contract this path implements: round-to-nearest-even, f16 denormals
     // kept on input and output, and FP16_OVFL clear. mode_bits holds the
     // fields this path tracks (round in [3:0], denorm in [7:4], FP16_OVFL in
@@ -1650,7 +1650,7 @@ struct DirectCompute {
             vector_write(i.dst, place_subword(i, result));
             return true;
         }
-        if (n == "v_add_f16" || n == "v_sub_f16" || n == "v_subrev_f16" || n == "v_mul_f16") {
+        if (binary16_alu(n) || binary16_unary(n)) {
             // The graphics frontend shares this ALU. Leave those programs on the
             // existing refusal; this lowering is the direct compute path.
             if (graphics_input)
@@ -1699,17 +1699,23 @@ struct DirectCompute {
                 return ir.invoke("float", "legacyF16ToF32", 131, {{"i32", bits}}, "nounwind readnone");
             };
             auto a = widen(half_bits(0));
-            auto b = widen(half_bits(1));
-            if (n == "v_subrev_f16")
-                std::swap(a, b);
-            const char *op = n == "v_mul_f16" ? "fmul" : n == "v_add_f16" ? "fadd" : "fsub";
-            auto widened = ir.value(string(op) + " float " + a + ", " + b);
+            string widened;
+            if (n == "v_rcp_f16") {
+                widened = ir.value("fdiv float 1.000000e+00, " + a);
+            } else if (n == "v_sqrt_f16" || n == "v_exp_f16") {
+                widened = ir.invoke("float", "unary.f32", n == "v_sqrt_f16" ? 24 : 21,
+                                    {{"float", a}}, "nounwind readnone");
+            } else {
+                auto b = widen(half_bits(1));
+                if (n == "v_subrev_f16")
+                    std::swap(a, b);
+                const char *op = n == "v_mul_f16" ? "fmul" : n == "v_add_f16" ? "fadd" : "fsub";
+                widened = ir.value(string(op) + " float " + a + ", " + b);
+            }
             auto bits = ir.value("bitcast float " + widened + " to i32");
-            // f32 has a 24-bit significand, which covers a correctly rounded f16
-            // add, sub or mul (2*11+2). Round with the same integer nearest-even
-            // conversion v_cvt_f16_f32 uses.
+            // Round with the same integer nearest-even conversion v_cvt_f16_f32 uses.
             auto rounded = packed_half_rne(bits);
-            // D[31:16] keeps its value: LLVM GCNSubtarget::zeroesHigh16BitsOfDest lists these four ops with
+            // D[31:16] keeps its value: LLVM GCNSubtarget::zeroesHigh16BitsOfDest says
             // "On gfx10, all 16-bit instructions preserve the high bits", as v_cvt_f16_f32 above already does.
             vector_write(i.dst, i.subword ? place_subword(i, rounded)
                                           : ir.binary("or", ir.binary("and", read(i.dst), "4294901760"),
@@ -3784,7 +3790,7 @@ struct DirectCompute {
             if (!p.reached[k])
                 continue;
             const auto &op = p.code[k];
-        if (binary16_alu(op.name) ||
+        if (binary16_alu(op.name) || binary16_unary(op.name) ||
             op.name == "v_pk_min_f16" ||
             op.name == "v_pk_max_f16" ||
             op.name == "v_cvt_f16_u16" ||
