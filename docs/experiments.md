@@ -27,6 +27,13 @@ Lane reads may refill `vcc_lo` and, in wave32, `vcc_hi` as ordinary scalar data.
 The compute fixture reads both result words and SCC from two workgroups.
 [Experiment and reproduction commands](experiments/native-salu64-ops.md)
 
+## Byte-window stores in direct compute
+
+Raw buffer stores accept a descriptor with a cleared stride, a byte count
+derived from that descriptor's clamped stride, and the raw OOB selector.
+The compute fixture reads back all four store widths across two workgroups.
+[Experiment and reproduction commands](experiments/native-bytewin-store.md)
+
 ## Guest row mirrors and masked branches in the direct DXIL frontend
 
 The hardware fixture gives each guest lane a distinct value. DPP16 control

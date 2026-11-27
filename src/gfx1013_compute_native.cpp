@@ -432,7 +432,8 @@ static std::optional<Symbol> byte_descriptor_field(const Inst &i, const State &s
     if (i.name == "s_max_u32" && a.type == T::stride && b.value == 1) return field(a, T::byte_stride);
     if (i.name == "s_and_b32" && b.value == 0xc000ffff && component(a,1)) return field(a,T::zero_stride_word);
     if (i.name == "s_and_b32" && b.value == 0xcfffffff && component(a,3)) return field(a,T::clear_oob);
-    if (i.name == "s_or_b32" && b.value == 0x30000000 && a.type == T::clear_oob) return field(a,T::byte_oob);
+    if (i.name == "s_or_b32" && b.value == 0x30000000 && (a.type == T::clear_oob || component(a,3)))
+        return field(a,T::byte_oob);
     return {};
 }
 State transfer(const Inst &i, State s, bool wave64, bool graphics) {
@@ -709,9 +710,12 @@ struct Emit {
         const bool indexed = sym.type == Symbol::Type::indexed_descriptor;
         if ((!indexed && sym.type != Symbol::Type::descriptor) || base + width > state.size())
             refuse(i.pc, "unproven resource descriptor s" + to_string(base));
+        const bool byte_window = kind == ComputeViewKind::byte_window_srv ||
+                                 (kind == ComputeViewKind::raw_buffer_uav && width == 4 && i.name == "buffer_store_raw" &&
+                                  state[base + 1].type == Symbol::Type::zero_stride_word);
         for (unsigned j = 1; j < width; ++j) {
             Symbol expected = sym;
-            if (kind == ComputeViewKind::byte_window_srv) {
+            if (byte_window) {
                 constexpr Symbol::Type fields[] = {Symbol::Type::descriptor, Symbol::Type::zero_stride_word,
                                                    Symbol::Type::byte_count, Symbol::Type::byte_oob};
                 expected.type = fields[j];
