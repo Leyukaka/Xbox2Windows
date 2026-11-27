@@ -87,7 +87,7 @@ struct Inst {
     }
     unsigned target() const { return next + 4 * static_cast<int16_t>(a & 65535); }
 };
-Inst decode(const string &bytes, unsigned pc,bool direct=false, bool graphics=false) {
+Inst decode(const string &bytes, unsigned pc,bool direct=false, bool graphics=false, bool wave64=false) {
     const auto encoded=gfx1013::instruction(bytes,pc);
     Inst i;
     i.pc = pc;
@@ -270,6 +270,7 @@ Inst decode(const string &bytes, unsigned pc,bool direct=false, bool graphics=fa
         const bool sdwa_logic = i.enc == Encoding::Vop2 && i.op == 0x1d;
         const bool sdwa_class = i.enc == Encoding::Vopc && i.op == 0x88;
         const bool sdwa_compare = i.enc == Encoding::Vopc && !sdwa_class;
+        const unsigned sdwa_mask_limit = direct && !graphics && !wave64 ? 107 : 106;
         if (direct && i.src[0] == 249 && (sdwa_compare || i.enc == Encoding::Vop1 || i.enc == Encoding::Vop2)) {
             // Operand profiles from disasm_rdna2's GFX10 VOP1/VOP2 SDWA
             // decoder. Admit only profiles with a direct result placement.
@@ -293,7 +294,7 @@ Inst decode(const string &bytes, unsigned pc,bool direct=false, bool graphics=fa
             const Word ext = take();
             const unsigned sources = i.enc == Encoding::Vop1 ? 1 : 2;
             if (sdwa_compare) {
-                if ((ext & 0x8000) && (name.substr(0,7) == "v_cmpx_" || ((ext >> 8) & 127) > 106))
+                if ((ext & 0x8000) && (name.substr(0,7) == "v_cmpx_" || ((ext >> 8) & 127) > sdwa_mask_limit))
                     refuse(pc, "invalid SDWA compare destination");
                 i.dst = ext & 0x8000 ? (ext >> 8) & 127 : 106;
             } else {
@@ -339,7 +340,7 @@ Inst decode(const string &bytes, unsigned pc,bool direct=false, bool graphics=fa
             } else {
                 // VOPC has a scalar mask destination in the same bits that VOP2 uses for placement.
                 i.dst = ext & 0x8000 ? (ext >> 8) & 127 : 106;
-                if ((ext & 0x70480000u) || (i.dst > 105 && i.dst != 106))
+                if ((ext & 0x70480000u) || i.dst > sdwa_mask_limit)
                     refuse(pc, "invalid SDWA class modifiers or mask destination");
                 i.neg = (ext >> 20) & 1;
                 i.abs = (ext >> 21) & 1;
@@ -664,7 +665,7 @@ Program parse(const string &code, unsigned entry, const State &initial, bool gra
             if (pc >= code.size() || (next != instructions.begin() && std::prev(next)->second.next > pc))
                 refuse(pc, "branch outside code or into an instruction");
             const auto fetch = fixed.find(pc);
-            auto instruction = fetch != fixed.end() ? fetch->second : decode(code, pc,true,graphics);
+            auto instruction = fetch != fixed.end() ? fetch->second : decode(code, pc,true,graphics,wave64);
             if (next != instructions.end() && instruction.next > next->first)
                 refuse(pc, "overlapping instruction boundaries");
             instructions.emplace_hint(next, pc, instruction);
