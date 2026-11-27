@@ -1297,11 +1297,11 @@ struct DirectCompute {
         }
         if ((i.subword || (!i.wide && !i.dpp_control && !permuted)) &&
             (n == "v_cvt_f16_f32" || n == "v_cvt_f32_f16")) {
-            if (i.scale || i.clamp || i.src_sext[0])
+            const bool narrow = n == "v_cvt_f16_f32";
+            if (i.scale || (i.clamp && (narrow || !i.subword)) || i.src_sext[0])
                 refuse(i.pc, "unsupported SDWA half conversion modifier");
             string bits = operand32(i, i.src[0]);
             if (i.subword) bits = subword(bits, i.src_select[0], false);
-            const bool narrow = n == "v_cvt_f16_f32";
             if (i.abs) bits = ir.binary("and", bits, narrow ? "2147483647" : "32767");
             if (i.neg) bits = ir.binary("xor", bits, narrow ? "2147483648" : "32768");
             if (narrow) {
@@ -1310,6 +1310,13 @@ struct DirectCompute {
             } else {
                 auto f = ir.invoke("float", "legacyF16ToF32", 131, {{"i32",bits}}, "nounwind readnone");
                 bits = ir.value("bitcast float " + f + " to i32");
+                if (i.clamp) {
+                    // Integer clamp, as v_ldexp does: a set sign bit or NaN gives +0, values above 1.0 give 1.0.
+                    // dx.op saturate may keep -0 or flush a denormal depending on the float mode.
+                    auto nan = cmp("ugt", ir.binary("and", bits, "2147483647"), "2139095040");
+                    auto low = ir.value("or i1 " + nan + ", " + cmp("slt", bits, "0"));
+                    bits = select(low, "0", select(cmp("sgt", bits, "1065353215"), "1065353216", bits));
+                }
             }
             vector_write(i.dst, place_subword(i, bits));
             return true;

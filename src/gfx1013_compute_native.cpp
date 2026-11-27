@@ -326,7 +326,9 @@ Inst decode(const string &bytes, unsigned pc,bool direct=false, bool graphics=fa
                 if (half_alu && ((i.dst_select != 4 && i.dst_select != 5) ||
                                  (i.dst_unused != 0 && i.dst_unused != 2)))
                     refuse(pc, "unsupported SDWA destination modifier");
-                if (i.dst_select == 7 || i.dst_unused == 3 || ((i.clamp || i.scale) && !floats.count(name) && !conversion) ||
+                const bool clamp_only = !graphics && name == "v_cvt_f32_f16";
+                if (i.dst_select == 7 || i.dst_unused == 3 ||
+                    ((i.scale || (i.clamp && !clamp_only)) && !floats.count(name) && !conversion) ||
                     (sources == 1 && (ext & 0xbf000000u)))
                     refuse(pc, "unsupported SDWA destination modifier");
             }
