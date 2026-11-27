@@ -17,7 +17,7 @@ SELECTORS = (1, 8, 3, 0, 15, 2, 9, 4, 8, 1, 14, 5, 2, 11, 6, 7)
 
 # VOP3A word 0: opcode 25:16 (377/378), FI 11, BOUND_CTRL 12, v1 destination.
 # Word 1: S0 8:0 (258 = v2), S1 17:9, S2 26:18. A selector of 255
-# consumes the third word. Keep the CPU model separate from the machine words.
+# references the shared third word. Keep the CPU model separate from the machine words.
 CASES = (
     ("cross-literal-bound", True, False, True, SELECTORS,
      (0xD7781001, 0x0035FF02, 0x492F0381)),  # x16 BC, v2/literal/s13
@@ -31,6 +31,8 @@ CASES = (
      (0xD7770001, 0x00341902)),  # permlane16, v2/s12/s13
     ("cross-s2-literal", True, False, False, SELECTORS,
      (0xD7780001, 0x03FC1902, 0x76B25E18)),  # x16, v2/s12/literal
+    ("cross-shared-literal", True, False, False, (1, 8, 3, 0, 15, 2, 9, 4) * 2,
+     (0xD7780001, 0x03FDFF02, 0x492F0381)),  # x16, v2/literal/literal
 )
 
 
@@ -77,10 +79,10 @@ def controls(cli, sdk, work, root):
     refused = {}
     for instruction, threads, error in (
             ((0xD7782001, 0x00341902), 64, "unsupported permlane modifier or op_sel"),  # x16 op_sel[2]
+            ((0xD7788001, 0x00341902), 64, "unsupported permlane modifier or op_sel"),  # x16 clamp
             ((0xD7780001, 0x00360702), 64, "permlane selectors must be uniform"),  # v2/v3/s13
             ((0xD7780001, 0x00341902), 16, "thread count divisible by 32"),  # x16 partial pair
             ((0xD7770001, 0x00341902), 8, "thread count divisible by 16"),  # permlane16 partial row
-            ((0xD7780001, 0x03FDFF02, 0), 64, "one literal selector"),  # both selectors marked literal
             ((0xD7780001, 0x00341880), 64, "S0 must be a VGPR")):  # inline 0/s12/s13
         refused[request(requests, root, instruction, threads)] = error
     result = subprocess.run(
