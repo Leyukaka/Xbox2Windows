@@ -3545,7 +3545,12 @@ requests, the C++ formatter emits `uav N tex3d float table P OFF channels 4` and
 `uav N tex1d float table P OFF channels 4`. The stand-in validates UAV view
 dimensions and mip levels, including the W-slice range within the selected 3D mip.
 
-Results: on an NVIDIA GeForce RTX 5080 (Windows 11, DXC from the Windows SDK 10.0.26100) the 3D, 3D NSA and 1D
-store cases matched their mip-one words after `compile_dxil` published the request, and the mismatched view, 3D W
-range and 1D mip controls were refused with the sentinels intact; on WARP the PSO was refused, so only the manifests were checked there. Writing a 3D UAV as
-`tex2d`, or dropping the W range check, each fail it.
+On an NVIDIA GeForce RTX 5080 (Windows 11, DXC from the Windows SDK 10.0.26100), the 3D, 3D NSA and 1D
+store cases matched their mip-one words after `compile_dxil` published the translations. The mismatched-view,
+3D W-range and 1D mip controls were refused with their sentinels intact.
+
+If a published compute PSO fails to create, the stand-in checks the adapter's wave capabilities. The native
+3D, 3D NSA and 1D cases report a WARP skip only for `pipeline creation failed: the adapter has no 32-lane waves`.
+Other PSO failures fail the test. On WARP and hardware, portable `cs_6_0` fixtures publish a hand-written
+manifest and bytecode under the original guest program's request key. These cases require successful 3D and 1D
+mip-one readback and check the same mismatched-view, 3D W-range and 1D mip refusals with sentinels intact.

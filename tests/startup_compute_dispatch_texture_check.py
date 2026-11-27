@@ -13,8 +13,8 @@ runs share one cache:
 4. texture-store-denied (a texture without unordered access, whose view the stand-in does not create): refused
    with one logged reason, every half keeps its sentinel.
 A fifth run binds the same program under a manifest edited to declare no entry values.
-With compile_dxil, the 1D and 3D float texture cases check offline request publication, mip-one readback,
-mismatched views, an invalid 3D W range, and an invalid 1D mip.
+Portable 1D and 3D float texture cases check offline request publication, mip-one readback, mismatched views,
+an invalid 3D W range, and an invalid 1D mip. With compile_dxil, the native translations check the same path.
 
 Texture input: case A of startup_gfx2hlsl_compute_check.py with a level-zero sample of a 2D texture XORed into the
 stored word (a static sampler, a texture view at table byte 64). The consumer adds a 1x1 RGBA8 texture whose red
@@ -157,6 +157,7 @@ STORE_FORMS = {
 }
 STORE_VALUES = (0x3f400000, 0x3e800000, 0x40810000, 0xbf810001)
 STORE_RSRC2 = (10 << 1) | C.TGID_X | C.TGID_Y | C.tidig(2)
+NO_WAVES = 'pipeline creation failed: the adapter has no 32-lane waves'
 
 
 def store_group(form):
@@ -182,7 +183,24 @@ def store_program(form):
     return prefix + address + bytes.fromhex('7fc08cbf') + values + bytes.fromhex(STORE_FORMS[form] + '000081bf')
 
 
-def store_3d1d(directory, consumer, compiler, sdk, env, adapter, form):
+def publish_portable_store(cache, dxc, key, dim, group):
+    name = f'{key:016x}'
+    source = cache / f'{name}.hlsl'
+    coord = 'uint3(id.xy, 1)' if dim == '3d' else 'id.x'
+    threads = ', '.join(map(str, group))
+    values = ', '.join(f'0x{word:08x}u' for word in STORE_VALUES)
+    source.write_text(f'RWTexture{dim.upper()}<float4> outputTexture : register(u0);\n'
+                      f'[numthreads({threads})]\n'
+                      'void main(uint3 id : SV_DispatchThreadID) {\n'
+                      f'    outputTexture[{coord}] = asfloat(uint4({values}));\n'
+                      '}\n', encoding='ascii')
+    subprocess.run([dxc, '-T', 'cs_6_0', '-E', 'main', '-Fo', cache / f'{name}.cs.cso', source], check=True)
+    (cache / f'{name}.txt').write_text(
+        f'x2w-manifest 2\nstage cs\ngroup {group[0]} {group[1]} {group[2]}\nud 0\n'
+        f'uav 0 tex{dim} float table 1 64 channels 4\n', encoding='ascii')
+
+
+def store_3d1d(directory, consumer, dxc, env, adapter, form, compiler=None, sdk=None):
     cache, base = prepare(directory)
     env = dict(base, **env)
     env.pop('X2W_NATIVE_SHADERS', None)
@@ -209,21 +227,24 @@ def store_3d1d(directory, consumer, compiler, sdk, env, adapter, form):
     got, result = run(directory, consumer, env, mode, layout)
     assert got == initial and len(lines(result, 'Dispatch(2, 1, 1) refused: no translation')) == 1, result.stderr[-3000:]
     key = int(lines(result, 'x2w-draw compute request')[0].split()[3], 16)
-    compiled = subprocess.run([compiler, sdk, directory / 'frontend', 'gfx1013-direct-cs@0', '--requests', cache, cache],
-                              capture_output=True, text=True)
-    assert compiled.returncode == 0 and 'requests=1 compiled=1 refused=0' in compiled.stdout, (
-        compiled.stdout, compiled.stderr)
+    dim = '3d' if volume else '1d'
+    if compiler is None:
+        publish_portable_store(cache, dxc, key, dim, group)
+    else:
+        compiled = subprocess.run([compiler, sdk, directory / 'frontend', 'gfx1013-direct-cs@0', '--requests',
+                                   cache, cache], capture_output=True, text=True)
+        assert compiled.returncode == 0 and 'requests=1 compiled=1 refused=0' in compiled.stdout, (
+            compiled.stdout, compiled.stderr)
     assert (cache / f'{key:016x}.cs.cso').read_bytes().startswith(b'DXBC')
     manifest = (cache / f'{key:016x}.txt').read_text().splitlines()
-    dim = '3d' if volume else '1d'
     assert f'uav 0 tex{dim} float table 1 64 channels 4' in manifest, manifest
 
     got, result = run(directory, consumer, env, mode, layout)
     # Older WARP builds refuse the direct compiler's WaveSize(32) PSO.
-    if adapter == 'warp' and lines(result, 'not translated: pipeline creation failed'):
-        assert got == initial and len(lines(result, 'Dispatch(2, 1, 1) refused: pipeline creation failed')) == 1, (
+    if compiler is not None and adapter == 'warp' and lines(result, f'not translated: {NO_WAVES}'):
+        assert got == initial and len(lines(result, f'Dispatch(2, 1, 1) refused: {NO_WAVES}')) == 1, (
             result.stderr[-3000:])
-        print(f'{form}: manifest verified; WARP refused PSO creation, skipping dispatch and view checks')
+        print(f'{form}: native 3D/1D dispatch cases skipped on WARP: the adapter has no 32-lane waves')
         return
     assert len(lines(result, 'Dispatch(2, 1, 1) translated')) == 1, result.stderr[-3000:]
     assert got == expected, (form, sum(a != b for a, b in zip(got, expected, strict=True)))
@@ -240,7 +261,8 @@ def store_3d1d(directory, consumer, compiler, sdk, env, adapter, form):
         refusal = lines(result, 'Dispatch(2, 1, 1) refused:')
         assert len(refusal) == 1 and refusal[0].endswith(reason), result.stderr[-3000:]
         assert got == untouched and not lines(result, 'Dispatch(2, 1, 1) translated')
-    print(f'{form}: {len(expected)} mip-one words match; incompatible views refused with sentinels intact')
+    fixture = 'portable' if compiler is None else 'native'
+    print(f'{fixture} {form}: {len(expected)} mip-one words match; incompatible views refused with sentinels intact')
 
 
 # v_xor_b32 v5, v5, v12: the assembled `v_xor_b32 v5, v5, v6` of case A with its second source register changed
@@ -364,9 +386,11 @@ def main(consumer, dxc, adapter, compiler=None, sdk=None):
         env['X2W_TEST_DISPATCH_HARDWARE'] = '1'
     with tempfile.TemporaryDirectory() as temporary:
         store(Path(temporary) / 'store', consumer, dxc, env)
+        for form in ('volume', 'line'):
+            store_3d1d(Path(temporary) / f'portable-{form}', consumer, dxc, env, adapter, form)
         if compiler is not None:
             for form in STORE_FORMS:
-                store_3d1d(Path(temporary) / form, consumer, compiler, sdk, env, adapter, form)
+                store_3d1d(Path(temporary) / form, consumer, dxc, env, adapter, form, compiler, sdk)
         sample(Path(temporary) / 'sample', consumer, dxc, env)
         filtered(Path(temporary) / 'filtered', consumer, dxc, env)
     print(f'startup_compute_dispatch_texture: PASS on {adapter}')
