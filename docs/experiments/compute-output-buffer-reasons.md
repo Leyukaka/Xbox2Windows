@@ -96,6 +96,14 @@ need a view that D3D12 rejects when it is created: with the debug layer on, the 
 ctest --preset dev --no-tests=error -R "^startup_compute_token_interval_(warp|hardware)$" -V
 ```
 
+Both tests pass on WARP (10.0.26100.9818) and on an RTX 4090 (driver 32.0.16.1088), Windows 11 build 26300,
+debug layer on. With only the split reverted, the bound view still matches and the three cases are still refused,
+each with the old reason, so all three expectations fail.
+
+On WARP, byte 32 of the consumer's four-descriptor heap is not a descriptor: a view created there ends the
+consumer with exit 2173. The `dispatch-uav-token-*` modes therefore create the view at byte 64 and copy its token to
+byte 32, as a title copies descriptors.
+
 ## Published half-width buffer stores
 
 A native slot 67 request with a `half_buffer_uav` now publishes
