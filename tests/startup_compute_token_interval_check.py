@@ -9,15 +9,13 @@ gfx2hlsl.py --pending with DXC that view is bound and words 4-315 match the case
 replaced through X2W_TEST_DISPATCH_UAV, one condition at a time, and each dispatch is refused with its own reason in
 the log and the census and writes no output word:
 
-- a raw view of zero elements;
 - an R16_UINT view of one element (2 bytes) at byte 16;
 - a raw view of 4 Mi + 4 elements (16 MiB + 16 bytes) of a committed buffer 64 KiB over 16 MiB;
-- an R32_UINT view at byte 4, inside the buffer;
-- a raw view of 4 elements at byte 1600, past the 1280-byte buffer;
-- a raw view of 320 elements at byte 16, 16 bytes past the buffer's end.
+- an R32_UINT view at byte 4, inside the buffer.
 
-The first, fifth and sixth views are invalid for D3D12, which the stand-in forwards as written. Exit 77 when the
-adapter is not available.
+The other three reasons (an empty interval, one that starts past the buffer and one that crosses its end) need a
+view that D3D12 itself rejects when it is created; with the debug layer on, that removes the device. Exit 77 when
+the adapter is not available.
 """
 from pathlib import Path
 import os
@@ -40,12 +38,9 @@ def view(first, elements, fmt=RAW):
 
 
 CONTROLS = (
-    ('raw', view(4, 0), 'an output UAV interval is empty'),
     ('raw', view(8, 1, R16_UINT), 'an output UAV interval is not whole dwords'),
     ('large', view(0, (4 << 20) + 4), 'an output UAV interval is over 16 MiB'),
     ('raw', view(1, 300, R32_UINT), 'an output UAV interval is not 16-byte aligned in its buffer'),
-    ('raw', view(400, 4), 'an output UAV interval starts past its buffer'),
-    ('raw', view(4, C.WORDS), 'an output UAV interval crosses the end of its buffer'),
 )
 
 

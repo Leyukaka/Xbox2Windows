@@ -440,7 +440,10 @@ static int dispatch_slot67(IDXGIAdapter* adapter, void* device, const std::strin
                     word(&__uuidof(ID3D12Resource)), word(&output))))) return 71;
         }
         if (mode == "dispatch-uav-token-copied") copied_token_output = output;
-        invoke(device, 19, word(output), 0, word(&view), cpu + 32);
+        // Byte 32 is not a descriptor of the heap on every adapter (WARP): the view is created at byte 64 and its
+        // token copied to byte 32, as a title copies descriptors.
+        invoke(device, 19, word(output), 0, word(&view), cpu + 64);
+        std::memcpy(reinterpret_cast<void*>(cpu + 32), reinterpret_cast<const void*>(cpu + 64), 16);
         if (mode == "dispatch-uav-token-wrong-slot")
             reinterpret_cast<UINT*>(cpu + 32)[2] = 18;
     }

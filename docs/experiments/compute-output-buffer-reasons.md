@@ -86,9 +86,11 @@ element, element count, stride, flags, backing width, byte offset and byte count
 
 `tests/startup_compute_token_interval_check.py` publishes case A with 32-byte table records through
 `gfx2hlsl.py --pending` and binds a raw slot-19 view at byte 16 of the placed output buffer. Words 4-315 match.
-Each of the six conditions then comes from one replaced view description, and each dispatch refuses with its own
-reason in the log and the census and leaves every word at its sentinel. Views 1, 5 and 6 are invalid for D3D12;
-the stand-in forwards them as written.
+Conditions 2, 3 and 4 then each come from one replaced view description (an R16_UINT view of one element, a raw
+view of 16 MiB + 16 bytes of a committed buffer 64 KiB over 16 MiB, an R32_UINT view at byte 4), and each dispatch
+refuses with its own reason in the log and the census and leaves every word at its sentinel. Conditions 1, 5 and 6
+need a view that D3D12 rejects when it is created: with the debug layer on, the device is removed at
+`CreateUnorderedAccessView`, so no fixture creates one.
 
 ```powershell
 ctest --preset dev --no-tests=error -R "^startup_compute_token_interval_(warp|hardware)$" -V
