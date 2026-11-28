@@ -2040,7 +2040,8 @@ struct DirectCompute {
                     n == "s_quadmask_b32" || n == "s_quadmask_b64" ||
                     n == "s_and_saveexec_b64" || n == "s_or_saveexec_b64" || n == "s_xor_saveexec_b64" ||
                     n == "s_andn2_saveexec_b64" || n == "s_orn2_saveexec_b64" ||
-                    n == "s_nand_saveexec_b64" || n == "s_nor_saveexec_b64" || n == "s_xnor_saveexec_b64";
+                    n == "s_nand_saveexec_b64" || n == "s_nor_saveexec_b64" || n == "s_xnor_saveexec_b64" ||
+                    n == "s_andn2_wrexec_b64";
                 const bool overwrites = mask_scc || n == "s_abs_i32" ||
                     n == "s_bcnt0_i32_b32" || n == "s_bcnt1_i32_b32" ||
                     n == "s_bcnt0_i32_b64" || n == "s_bcnt1_i32_b64" ||
@@ -3046,12 +3047,16 @@ struct DirectCompute {
         }
         if ((i.enc == Encoding::Sop1 || i.enc == Encoding::Sop2) && n.size() > 6 && n.substr(n.size() - 4) == "_b64") {
             bool save = n.find("_saveexec_") != Name::npos;
+            const bool wrexec = compute && wave64 && n == "s_andn2_wrexec_b64";
             auto op = n.substr(2, n.find('_', 2) - 2);
-            if ((i.dst & 1) || (i.dst > 104 && i.dst != 106 && i.dst != 126) ||
-                (save && i.enc != Encoding::Sop1) || (!save && i.enc != Encoding::Sop2))
+            if (wrexec ? ((i.dst | i.src[0]) & 1) || i.dst > 104 || i.src[0] > 104
+                       : (i.dst & 1) || (i.dst > 104 && i.dst != 106 && i.dst != 126) ||
+                             (save ? i.enc != Encoding::Sop1 : i.enc != Encoding::Sop2))
                 refuse(i.pc, "unsupported wave64 scalar operation");
             auto ah = pair_high(i, i.src[0]);
-            auto bl = save ? read(126) : b, bh = save ? read(127) : pair_high(i, i.src[1]);
+            const bool updates_exec = save || wrexec;
+            auto bl = updates_exec ? read(126) : b;
+            auto bh = updates_exec ? read(127) : pair_high(i, i.src[1]);
             auto combine = [&](const string &left, const string &right) -> string {
                 if (op == "and" || op == "or" || op == "xor") return ir.binary(string(op), left, right);
                 if (op == "andn2" || op == "orn2")
@@ -3060,11 +3065,12 @@ struct DirectCompute {
                     return ir.binary("xor", ir.binary(op == "nand" ? "and" : op == "nor" ? "or" : "xor", left, right), "4294967295");
                 refuse(i.pc, "unsupported wave64 scalar mask operation");
             };
-            // SAVEEXEC combines its source operand with the old EXEC in ISA operand order.
+            // SAVEEXEC and WREXEC combine the source with old EXEC in ISA operand order.
+            // WREXEC stores the new mask in the destination pair.
             auto lo = combine(a, bl), hi = combine(ah, bh);
             write(i.dst, save ? bl : lo);
             write(i.dst + 1, save ? bh : hi);
-            if (save) { write(126, lo); write(127, hi); }
+            if (updates_exec) { write(126, lo); write(127, hi); }
             write(128, ir.value("zext i1 " + cmp("ne", ir.binary("or", lo, hi), "0") + " to i32"));
             return;
         }
