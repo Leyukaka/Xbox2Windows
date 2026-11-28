@@ -1262,6 +1262,8 @@ extern "C" BOOL WINAPI XMemAllocatePhysicalPages(ULONG_PTR flags, PULONG_PTR cou
             status = era_physical::allocate(era_physical::mem_64k_pages, reinterpret_cast<std::uint64_t*>(count),
                                             reinterpret_cast<std::uint64_t*>(pages));
         }
+        // The caller stores the page number in a 21-bit entry.
+        static_assert(era_physical::capacity_pages <= 0x1FFFFF);
         if (status == era_physical::Status::ok)
             for (ULONG_PTR i = 0; i < *count; ++i) pages[i] <<= 4;
         x2w_local::logf("x2w-xmem XMemAllocatePhysicalPages flags=0x%llx pages=0x%llx -> %d",

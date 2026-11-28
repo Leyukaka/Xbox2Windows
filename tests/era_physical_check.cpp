@@ -160,6 +160,38 @@ bool lifetime_check()
     return true;
 }
 
+// XMemAllocatePhysicalPages returns page << 4 and the caller keeps the page number in a 21-bit entry.
+// Page numbers are reused, so across many times the capacity allocated in total (with a grant kept
+// live) every number stays in 1..capacity_pages and fits that entry.
+bool page_tokens_check()
+{
+    using era_physical::capacity_pages;
+    constexpr std::uint64_t entry_mask = 0x1FFFFF;
+    constexpr std::uint64_t batch_size = 4096;
+    constexpr std::uint64_t total = 9 * capacity_pages;
+    const Module<era_physical::Status> m{era_physical::allocate, era_physical::release, era_physical::granted_pages};
+    bool ok = true;
+    const auto check = [&](const Pages& pages) {
+        for (const auto page : pages)
+            ok = ok && page >= 1 && page <= capacity_pages && page <= entry_mask;
+    };
+    Pages held, batch;
+    if (m.granted() != 0 || !m.grant(3, held)) return false;
+    check(held);
+    for (std::uint64_t allocated = 0; allocated < total;) {
+        const auto count = std::min(batch_size, total - allocated);
+        if (!m.grant(count, batch)) return false;
+        check(batch);
+        if (!m.free(batch) || m.granted() != held.size()) return false;
+        allocated += count;
+    }
+    if (!m.free(held) || m.granted() != 0) return false;
+    std::printf("page tokens: %llu pages granted in total, every number in 1..%llu and in a 21-bit entry: %s\n",
+                static_cast<unsigned long long>(total + 3), static_cast<unsigned long long>(capacity_pages),
+                ok ? "yes" : "no");
+    return ok;
+}
+
 // Ownership as XMemMapPhysicalPages sees it (owns), from an empty registry to a full one and back.
 bool owns_check()
 {
@@ -237,7 +269,7 @@ int main(int argc, char** argv)
     if (scenario == "controls"sv) {
         passed = controls_check();
     } else if (scenario == "lifetime"sv) {
-        passed = lifetime_check();
+        passed = page_tokens_check() && lifetime_check();
     } else if (scenario == "owns"sv) {
         passed = owns_check();
     } else {
