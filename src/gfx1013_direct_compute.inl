@@ -2775,7 +2775,7 @@ struct DirectCompute {
             return;
         }
         if (compute && n == "s_bfm_b64") {
-            if ((i.dst & 1) || i.dst > 104)
+            if ((i.dst & 1) || (i.dst > 104 && i.dst != 126))
                 refuse(i.pc, "invalid s_bfm_b64 destination");
             if ((i.src[0] > 105 && !constant32(i, i.src[0])) ||
                 (i.src[1] > 105 && !constant32(i, i.src[1])))
@@ -2940,7 +2940,7 @@ struct DirectCompute {
             if (i.dst > 105)
                 refuse(i.pc, "invalid " + string(n) + " destination");
             const unsigned s0 = i.src[0];
-            const bool s0_pair = s0 <= 104 && !(s0 & 1);
+            const bool s0_pair = (s0 <= 104 && !(s0 & 1)) || s0 == 126;
             const bool s0_int = s0 >= 128 && s0 <= 208;
             if (!(s0_pair || s0_int || s0 == 255))
                 refuse(i.pc, "invalid " + string(n) + " source");
