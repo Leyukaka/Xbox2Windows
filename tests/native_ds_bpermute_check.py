@@ -44,7 +44,7 @@ def controls(cli, sdk, work):
     dump = subprocess.run([Path(sdk) / 'dxc.exe', '-dumpbin', shader],
                           capture_output=True, text=True, timeout=30, check=True).stdout
     assert 'addrspace(3)' not in dump and '@dx.op.barrier(i32 80, i32 8)' not in dump, dump
-    assert dump.count('@dx.op.waveReadLaneAt.i32(i32 117,') == 1, dump
+    assert dump.count('@dx.op.waveReadLaneAt.i32(i32 117,') == 32, dump
     # Check the SSA chain, including the separate source and destination EXEC
     # predicates and the old destination value.
     value = r'%[-\w.]+'
@@ -58,12 +58,19 @@ def controls(cli, sdk, work):
         (?P<src_mask>V) = and i32 (?P=exec), (?P=bit)
         (?P<src_active>V) = icmp ne i32 (?P=src_mask), 0
         (?P<data>V) = load i32, i32\* %r259, align 4
-        (?P<read>V) = call i32 @dx\.op\.waveReadLaneAt\.i32\(i32 117, i32 (?P=data), i32 (?P=lane)\)[^\n]*
-        (?P<gathered>V) = select i1 (?P=src_active), i32 (?P=read), i32 0
     '''
     lines = [line.strip().replace('V', value) for line in shape.strip().splitlines()]
     match = re.search(r'\n +'.join(lines), dump)
     assert match, dump
+    # Every lane is read with a constant index (a per-lane index read the wrong
+    # lane on WARP), and the lane named by the address is selected.
+    reads = re.findall(rf'({value}) = call i32 @dx\.op\.waveReadLaneAt\.i32\(i32 117, i32 '
+                       rf'{re.escape(match["data"])}, i32 (\d+)\)', dump)
+    assert sorted(int(k) for _, k in reads) == list(range(32)), dump
+    for k in range(32):
+        assert re.search(rf'= icmp eq i32 {re.escape(match["lane"])}, {k}\n', dump), (k, dump)
+    gathered = re.search(rf'({value}) = select i1 {re.escape(match["src_active"])}, i32 {value}, i32 0\n', dump)
+    assert gathered, dump
     # The independent destination predicate uses the current physical lane bit.
     lane = re.search(rf'({value}) = call i32 @dx\.op\.waveGetLaneIndex\(i32 111\)', dump)
     assert lane, dump
@@ -73,7 +80,7 @@ def controls(cli, sdk, work):
         rf'(?P<exec>{value}) = load i32, i32\* %r126, align 4',
         rf'(?P<mask>{value}) = and i32 (?P=exec), {re.escape(lane_bit[1])}',
         rf'(?P<active>{value}) = icmp ne i32 (?P=mask), 0',
-        rf'(?P<out>{value}) = select i1 (?P=active), i32 {re.escape(match["gathered"])}, i32 (?P=old)',
+        rf'(?P<out>{value}) = select i1 (?P=active), i32 {re.escape(gathered[1])}, i32 (?P=old)',
         r'store i32 (?P=out), i32\* %r270, align 4',
     ]
     # The old-value load can be emitted before or after the mask operations,

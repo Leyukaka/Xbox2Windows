@@ -4057,8 +4057,14 @@ struct DirectCompute {
             source_lane = select(present, source_lane, lane);
         }
         auto data = read(256 + ((i.b >> 8) & 255));
-        auto value = ir.invoke("i32", "waveReadLaneAt.i32", 117,
-                               {{"i32", data}, {"i32", source_lane}}, "nounwind");
+        // A per-lane WaveReadLaneAt index read the wrong lane on WARP. Read every
+        // present lane with a constant index and select the one each lane names.
+        string value = "0";
+        for (unsigned l = 0; l < (std::min)(threads, 32u); ++l) {
+            auto lane_value = ir.invoke("i32", "waveReadLaneAt.i32", 117,
+                                        {{"i32", data}, {"i32", to_string(l)}}, "nounwind");
+            value = select(cmp("eq", source_lane, to_string(l)), lane_value, value);
+        }
         // Model an inactive source as zero, as in the direct DPP8 lowering.
         vector_write(256 + (i.b >> 24), select(enabled, value, "0"));
     }
