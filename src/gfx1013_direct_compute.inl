@@ -840,6 +840,8 @@ struct DirectCompute {
         constexpr unsigned dx_kind[]{1, 2, 4, 5, 6, 7, 3, 8};
         constexpr unsigned coord_count[]{1, 2, 3, 3, 2, 3, 2, 3};
         const unsigned coords = coord_count[dim];
+        const bool exact_store = store && !half && !graphics_input && (dim == 1 || dim == 2 || dim == 5) &&
+                                 (mask == 1 || mask == 3 || mask == 7);
         if ((i.op != 0 && i.op != 1 && !store && !sample && !gather && !gather_lod && !dimensions) || !mask || (i.a & 0x3e0c0u) ||
             (i.b & 0x3c000000u) || (gather && ((mask & (mask - 1)) || (dim != 1 && dim != 3 && dim != 5))) ||
             (query && ((dim != 1 && dim != 3) || (mask & ~3u))) ||
@@ -847,7 +849,7 @@ struct DirectCompute {
             (compare_gather && dim == 3) ||
             ((sample || gather) && (i.a & 0x1000u) && gradient) ||
             (dimensions && (dim == 4 || dim >= 6 || (i.b & 0x40000000u))) ||
-            (store && !half && mask != 15) || (half && mask != 1 && mask != 3 && mask != 15) ||
+            (store && !half && mask != 15 && !exact_store) || (half && mask != 1 && mask != 3 && mask != 15) ||
             s.at(base).type != Symbol::Type::descriptor)
             refuse(i.pc, "direct image opcode or descriptor modifiers");
         if (gather_lod && (dim != 1 || (mask & (mask - 1)) || (i.a & 0x1006u) || (i.b & 0xc0000000u) || i.dst > 252))
@@ -856,10 +858,13 @@ struct DirectCompute {
             (dim >= 6 && (sample || gather || store || lod)))
             refuse(i.pc, "unsupported cube or multisample operation");
         const bool d16_sample = !store && (i.b >> 31);
-        const unsigned channels = half && mask == 1 ? 1 : half && mask == 3 ? 2 : 4;
+        const unsigned channels = (half || exact_store) && mask == 1 ? 1 :
+                                  (half || exact_store) && mask == 3 ? 2 : exact_store ? 3 : 4;
         const bool cube_sample = dim == 3 && (sample || gather);
         const auto kind = half    ? (channels == 1 ? ComputeViewKind::half_scalar_uav :
                                      channels == 2 ? ComputeViewKind::half2_texture_uav : ComputeViewKind::half4_texture_uav)
+                          : exact_store ? (channels == 1 ? ComputeViewKind::float_texture_uav :
+                                           channels == 2 ? ComputeViewKind::float2_texture_uav : ComputeViewKind::float3_texture_uav)
                           : store ? ComputeViewKind::texture_uav
                           : cube_sample ? (compare ? ComputeViewKind::cube_comparison_srv : ComputeViewKind::cube_sample_srv)
                           : d16_sample ? ComputeViewKind::d16_sample_srv
