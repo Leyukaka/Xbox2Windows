@@ -15,6 +15,10 @@ cmake --build --preset dev --target startup_stream_consumer d3d12_xs_shim compil
 ctest --preset dev --no-tests=error -V -R '^startup_native_graphics_draw_(hardware|warp)$'
 ```
 
+## Implicit derivatives in direct compute
+
+[Group shapes, lane mapping and readback fixtures](experiments/native-compute-implicit-derivatives.md)
+
 ## Slot 67 wave size in direct compute
 
 State block A bit 20 of dword 4 selects the guest wave size.
