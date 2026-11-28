@@ -1513,7 +1513,9 @@ struct DirectCompute {
             if (i.subword || i.dpp_control || permuted || i.scale ||
                 (i.wide && ((i.a & 0x7800) || ((i.abs | i.neg) & 6) || i.src[1] || i.src[2])))
                 refuse(i.pc, "unsupported " + string(n) + " operand modifiers");
-            auto bits = ir.binary("and", operand32(i, i.src[0]), "65535");
+            const unsigned r = i.src[0];
+            auto bits = r >= 240 && r <= 248 ? to_string(inline_half_words[r - 240])
+                                             : ir.binary("and", operand32(i, r), "65535");
             if (i.abs & 1) bits = ir.binary("and", bits, "32767");
             if (i.neg & 1) bits = ir.binary("xor", bits, "32768");
             auto sign = ir.binary("and", bits, "32768");
@@ -2876,7 +2878,9 @@ struct DirectCompute {
             auto carry = add ? cmp("ult", result, a) : cmp("ult", a, b);
             if (n.find("_ci_") != n.npos) {
                 unsigned src = i.src[2];
-                if (src > 106) refuse(i.pc, "unsupported carry-in mask source");
+                // vcc_hi is a numeric wave32 mask in direct compute; translate_program refuses a guest wave64.
+                if (src > 107 || (src == 107 && (wave64 || graphics_input)))
+                    refuse(i.pc, "unsupported carry-in mask source");
                 string bit;
                 if (graphics_input) {
                     bit = cmp("ne",graphics_lane_mask(i,state,src,"unproven vertex carry-in mask"),"0");
@@ -3687,7 +3691,8 @@ struct DirectCompute {
             return;
         }
         if (n == "v_cndmask_b32") {
-            if (!wave64 && i.src[2] == 107)
+            // In direct compute s107 holds numeric data; translate_program refuses a guest wave64 here.
+            if (!wave64 && i.src[2] == 107 && graphics_input)
                 refuse(i.pc, "unsupported wave32 conditional mask source");
             z = select(cmp("ne", ir.binary("and", wave64 ? select(upper_half, pair_high(i, i.src[2]), val(2)) : val(2), lane_bit), "0"), b, a);
         } else if (n == "v_mov_b32")
