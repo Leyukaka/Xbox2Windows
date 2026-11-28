@@ -63,16 +63,16 @@ class Case:
         self.src0, self.src1 = src0, src1
         self.shift = 16 if dst == WORD_1 else 0
         self.mask = 0xffff << self.shift
+        self.alternate = model.rsq_rounding(self.read(a, src0))[1] if op == 'rsq' else None
         self.want = self.expected(src0, src1, unused)
 
-    def expected(self, src0, src1, unused):
-        def read(value, control):
-            picked = model.pick(value, (control & 7) == WORD_1)
-            return fixture.modified(picked, bool(control & ABS), bool(control & NEG), 0)
+    @staticmethod
+    def read(value, control):
+        picked = model.pick(value, (control & 7) == WORD_1)
+        return fixture.modified(picked, bool(control & ABS), bool(control & NEG), 0)
 
-        left = read(self.a, src0)
-        result = (model.half_op(self.op, left) if self.op in fixture.UNARY_CODE else
-                  fixture.binary16(self.op, left, read(self.b, src1)))
+    def expected(self, src0, src1, unused):
+        result = fixture.binary16(self.op, self.read(self.a, src0), self.read(self.b, src1))
         other = OLD & ~self.mask if unused == PRESERVE else 0
         return (result << self.shift) | other
 
@@ -85,8 +85,8 @@ class Case:
 
     def matches(self, got):
         return (got & ~self.mask == self.want & ~self.mask and
-                model.same_half_result((got & self.mask) >> self.shift, (self.want & self.mask) >> self.shift,
-                                       self.op))
+                fixture.same_alu_result((got & self.mask) >> self.shift,
+                                        (self.want & self.mask) >> self.shift, self.op, self.alternate))
 
 
 def cases():
@@ -107,8 +107,11 @@ def cases():
     for op in fixture.UNARY_CODE:
         items.append(Case(op, 0xc4003800, 0, WORD_1, PRESERVE, WORD_1 | ABS, 0))
         items.append(Case(op, 0x44004000, 0, WORD_0, PAD, DWORD | NEG, 0))
-    for op in ('rsq', 'log'):
-        items.append(Case(op, 0x44000000, 0, WORD_1, PAD, WORD_0 | NEG, 0))
+    items += [
+        Case('rsq', 0x44000000, 0, WORD_1, PAD, WORD_0 | NEG, 0),
+        Case('rsq', 0x3bfe4400, 0, WORD_1, PRESERVE, WORD_1, 0),
+        Case('exp', 0x91c54400, 0, WORD_1, PRESERVE, WORD_1 | ABS, 0),
+    ]
     assert len(items) < fixture.STRIDE
     return items
 
@@ -148,6 +151,7 @@ def refusals():
         (sdwa(0x39, WORD_0, PAD, WORD_0, WORD_0), 'unimplemented direct SDWA operand profile'),  # max
         (sdwa(0x3a, WORD_0, PAD, WORD_0, WORD_0), 'unimplemented direct SDWA operand profile'),  # min
         (sdwa(0x55, WORD_0, PAD, DWORD, dst_mod=1 << 13, unary=True), dest_error),
+        (sdwa(0x57, WORD_0, PAD, WORD_0, unary=True), 'unimplemented direct SDWA operand profile'),
     ] + [
         (sdwa(op, WORD_0, PAD, DWORD, DWORD, dst_mod=1 << modifier), dest_error)
         for op in (PKRTZ, ADD_CO_CI) for modifier in (13, 14)
@@ -239,7 +243,7 @@ def run_gpu(gpu, sdk, items, code):
                 elif shift is not None:
                     mask = 0xffff << shift
                     matches = (got & ~mask == want & ~mask and
-                               model.same_half_result((got & mask) >> shift, (want & mask) >> shift))
+                               fixture.same_binary16((got & mask) >> shift, (want & mask) >> shift))
                 else:
                     matches = got == want
                 assert matches, (index, slot, hex(got), hex(want))
