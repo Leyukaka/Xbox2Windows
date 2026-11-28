@@ -538,9 +538,15 @@ struct DirectCompute {
         }
         if (i.enc == Encoding::Smem) {
             unsigned so = i.b >> 25;
-            const unsigned limit = smem_sgpr_limit(!graphics_input && !wave64);
+            const unsigned limit = smem_sgpr_limit(!graphics_input);
             const auto &low = s.at(i.src[0]);
             const bool root = low.type == Symbol::Type::root_address;
+            // Table and heap-offset descriptor lowering track identities and slot indices instead of
+            // loading payload bits.
+            if (wave64 && !graphics_input && i.op < 8 &&
+                (low.type == Symbol::Type::table || low.type == Symbol::Type::heap_offset) &&
+                i.dst + memory_count(i) > 106)
+                refuse(i.pc, "symbolic scalar memory destination overlaps wave64 VCC");
             if (low.type == Symbol::Type::heap_offset) {
                 // A resource-heap address formed by s_add_u32 (heap_offset_add): the same slot read as the SGPR-offset
                 // load below, with the byte offset in the low word.

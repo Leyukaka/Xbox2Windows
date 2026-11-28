@@ -90,8 +90,8 @@ struct Inst {
     unsigned target() const { return next + 4 * static_cast<int16_t>(a & 65535); }
 };
 unsigned memory_count(const Inst &i) { return 1u << (i.op & 7); }
-// Wave32 compute can use both VCC words as scalar data.
-unsigned smem_sgpr_limit(bool wave32_compute) { return wave32_compute ? 108 : 106; }
+// Direct compute stores both VCC words in scalar registers.
+unsigned smem_sgpr_limit(bool direct_compute) { return direct_compute ? 108 : 106; }
 
 Inst decode(const string &bytes, unsigned pc,bool direct=false, bool graphics=false, bool wave64=false) {
     const auto encoded=gfx1013::instruction(bytes,pc);
@@ -165,7 +165,7 @@ Inst decode(const string &bytes, unsigned pc,bool direct=false, bool graphics=fa
         i.dst = (a >> 6) & 127;
         i.src[0] = (a & 63) * 2;
         const unsigned soffset = i.b >> 25;
-        const unsigned limit = smem_sgpr_limit(direct && !graphics && !wave64);
+        const unsigned limit = smem_sgpr_limit(direct && !graphics);
         if ((i.b & 0x01f00000u) || (a & 0x14000) || (i.op & ~8u) > 4 ||
             (soffset != 125 && ((!direct && i.op < 8 && i.op != 2) || soffset >= limit)))
             refuse(pc, "unsupported scalar memory addressing");
@@ -679,7 +679,7 @@ State transfer(const Inst &i, State s, bool wave64, bool graphics, bool heap_win
     } else if (i.enc == Encoding::Smem) {
         auto base = s[i.src[0]];
         const unsigned offset_reg = i.b >> 25;
-        const Symbol index = offset_reg < smem_sgpr_limit(!graphics && !wave64) ? s[offset_reg] : Symbol{};
+        const Symbol index = offset_reg < smem_sgpr_limit(direct && !graphics) ? s[offset_reg] : Symbol{};
         unsigned n = memory_count(i);
         const bool heap_address = i.op == 2 && i.b >> 25 == 125 && heap_offset_address(s, i.src[0]);
         for (unsigned j = 0; j < n; ++j) {
