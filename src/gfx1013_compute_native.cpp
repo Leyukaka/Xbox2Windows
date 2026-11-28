@@ -205,7 +205,10 @@ Inst decode(const string &bytes, unsigned pc,bool direct=false, bool graphics=fa
                 refuse(pc, "formatted store needs an index-only linear view and supported component count");
             i.name = "buffer_store_format";
         } else if (i.op >= 0x1c && i.op <= 0x1f) {
-            if ((a & 0x3e000u) || (i.b & 0xe00000u))
+            // Direct compute ignores GLC, DLC and SLC cache-policy hints on raw stores.
+            const bool compute = direct && !graphics;
+            if ((a & (compute ? 0x32000u : 0x3e000u)) ||
+                (i.b & (compute ? 0xa00000u : 0xe00000u)))
                 refuse(pc, "raw store needs a linear byte offset");
             i.name = "buffer_store_raw";
         } else if (i.op >= 0x0c && i.op <= 0x0f) {
