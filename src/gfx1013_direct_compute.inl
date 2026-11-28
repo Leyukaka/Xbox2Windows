@@ -2327,13 +2327,19 @@ struct DirectCompute {
                 return;
             }
         }
-        if (compute && (n == "v_dot4_i32_i8" || n == "v_dot4_u32_u8")) {
-            // Integer dot products use both packed words as-is. Require the
-            // canonical VOP3P OP_SEL/OP_SEL_HI and zero NEG_LO/NEG_HI.
-            if (i.enc != Encoding::Mix || (i.a & 0x7f00) != 0x4000 || (i.b >> 27) != 3)
+        const bool dot_accumulate = n == "v_dot4c_i32_i8";
+        if (compute && (dot_accumulate || n == "v_dot4_i32_i8" || n == "v_dot4_u32_u8")) {
+            // Integer dots use both packed words as-is. The VOP3P forms
+            // require canonical OP_SEL/OP_SEL_HI and zero NEG_LO/NEG_HI.
+            if (dot_accumulate) {
+                if (i.enc != Encoding::Vop2 || i.wide || i.subword || i.dpp_control || permuted ||
+                    i.abs || i.neg || i.clamp || i.scale)
+                    refuse(i.pc, "unsupported packed byte dot-accumulate operand modifiers");
+            } else if (i.enc != Encoding::Mix || (i.a & 0x7f00) != 0x4000 || (i.b >> 27) != 3)
                 refuse(i.pc, "unsupported packed byte dot operand modifiers");
-            const bool sign = n == "v_dot4_i32_i8";
-            auto a = operand32(i, i.src[0]), b = operand32(i, i.src[1]), acc = operand32(i, i.src[2]);
+            const bool sign = n != "v_dot4_u32_u8";
+            auto a = operand32(i, i.src[0]), b = operand32(i, i.src[1]);
+            auto acc = operand32(i, dot_accumulate ? i.dst : i.src[2]);
             // The dot alone fits into i32 even for four unsigned 255*255
             // products. Saturate only the final addition to the accumulator.
             auto dot = ir.invoke("i32", "dot4AddPacked.i32", sign ? 163 : 164,
