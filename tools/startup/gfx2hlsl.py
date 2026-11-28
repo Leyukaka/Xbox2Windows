@@ -6,7 +6,7 @@ values (tables, vertex-buffer table, root buffers) turn into HLSL resources inst
 The output is HLSL for both stages plus a manifest that tells the runtime what to bind where.
 """
 import bisect
-from contextlib import suppress
+from contextlib import ExitStack, suppress
 import functools
 import os
 import re
@@ -13726,24 +13726,25 @@ def main():
         # The first pass retries earlier failures once unless --skip-failed / X2W_SKIP_FAILED is set;
         # later passes skip failures already written.
         completed = {}
+        watch_since_ns = time.time_ns()
         while True:
-            if watch_pass(out_dir, skip_failed, jobs=jobs, completed=completed):
+            if watch_pass(out_dir, skip_failed, jobs=jobs, completed=completed, watch_since_ns=watch_since_ns):
                 skip_failed = True
             time.sleep(interval)
     translate_pending(out_dir, skip_failed=skip_failed, jobs=jobs)
 
 
-
-
-def watch_pass(out_dir, skip_failed, jobs=None, completed=None):
+def watch_pass(out_dir, skip_failed, jobs=None, completed=None, watch_since_ns=None):
     """One --watch pass. A worker killed from outside (out of memory) breaks the pool; the pass is
     reported and its requests are retried on the next pass instead of ending the watcher.
 
     The completed dict is threaded across watch iterations to avoid re-reading published stage bytecode.
     """
     from concurrent.futures.process import BrokenProcessPool
+    if watch_since_ns is None:
+        watch_since_ns = time.time_ns()
     try:
-        translate_pending(out_dir, skip_failed=skip_failed, jobs=jobs, completed=completed)
+        translate_pending(out_dir, skip_failed=skip_failed, jobs=jobs, completed=completed, watch_since_ns=watch_since_ns)
         return True
     except BrokenProcessPool as error:
         print('translation pass interrupted, retrying: %s' % error, file=sys.stderr, flush=True)
@@ -13803,29 +13804,60 @@ def translation_jobs(jobs=None):
     return min(jobs, 61) if os.name == 'nt' else jobs  # ProcessPoolExecutor refuses more than 61 on Windows
 
 
-def translate_pending(out_dir, skip_failed=False, jobs=None, completed=None):
+def translate_pending(out_dir, skip_failed=False, jobs=None, completed=None, watch_since_ns=None):
     """Translate every request that has no result yet. The runtime writes the ready markers last.
 
     Requests are independent (each writes only its own <key>.* files), so several run in parallel
     processes; X2W_TRANSLATE_JOBS or --jobs (default: the processor count, at most 61 on Windows) sets how many.
     """
-    keys = pending_keys(out_dir, skip_failed, completed=completed)
-    if not keys:
-        return
-    jobs = min(translation_jobs(jobs), len(keys))
-    if jobs < 2:
-        for key in keys:
-            print('%016x: %s' % (key, translate_one(out_dir, key)), flush=True)
-        return
     from concurrent.futures import ProcessPoolExecutor
-    chunk = max(1, len(keys) // (jobs * 4))  # small batches keep every worker busy
-    with ProcessPoolExecutor(max_workers=jobs) as pool:
-        for key, result in zip(keys, pool.map(translate_one, [out_dir] * len(keys), keys, chunksize=chunk)):
-            print('%016x: %s' % (key, result), flush=True)
+    jobs = translation_jobs(jobs)
+    with ExitStack() as stack:
+        pool = None
+        for keys in pending_batches(out_dir, skip_failed, completed, jobs, watch_since_ns):
+            workers = min(jobs, len(keys))
+            if workers == 1:
+                results = (translate_one(out_dir, key) for key in keys)
+            else:
+                if pool is None:
+                    pool = stack.enter_context(ProcessPoolExecutor(max_workers=jobs))  # later batches may be larger
+                chunk = max(1, len(keys) // (workers * 4))
+                results = pool.map(translate_one, [out_dir] * len(keys), keys, chunksize=chunk)
+            for key, result in zip(keys, results):
+                print('%016x: %s' % (key, result), flush=True)
 
 
-def pending_keys(out_dir, skip_failed, completed=None):
+def pending_batches(out_dir, skip_failed, completed, jobs, watch_since_ns):
+    if watch_since_ns is None:
+        keys = pending_keys(out_dir, skip_failed, completed=completed)
+        if keys:
+            yield keys
+        return
+
+    # Even during the first pass, retry an earlier failure only once.
+    attempted = set()
+    batch_size = max(1, jobs * 4)
+    scan_time = float('-inf')
     keys = []
+    offset = 0
+    while True:
+        now = time.monotonic()
+        if now - scan_time >= 1:
+            scan_time = now
+            keys = pending_keys(out_dir, skip_failed, completed=completed,
+                                watch_since_ns=watch_since_ns, attempted=attempted)
+            offset = 0
+        batch = keys[offset:offset + batch_size]
+        if not batch:
+            return
+        offset += len(batch)
+        attempted.update(batch)
+        yield batch
+
+
+def pending_keys(out_dir, skip_failed, completed=None, watch_since_ns=None, attempted=()):
+    keys = []
+    recent = []
     manifest_only = os.environ.get('X2W_FXC') == ''
     try:
         entries = list(os.scandir(out_dir))
@@ -13849,6 +13881,8 @@ def pending_keys(out_dir, skip_failed, completed=None):
 
     for name, entry, m in req_items:
         key = int(m.group(1), 16)
+        if key in attempted:
+            continue
         ext = m.group(2)
         base_name = '%016x' % key
         mesh = ext == 'm57'
@@ -13958,8 +13992,15 @@ def pending_keys(out_dir, skip_failed, completed=None):
                     continue
             except OSError:
                 pass
+        if watch_since_ns is not None:
+            with suppress(OSError):
+                mtime_ns = entry.stat().st_mtime_ns
+                if mtime_ns > watch_since_ns:
+                    recent.append((mtime_ns, key))
+                    continue
         keys.append(key)
-    return keys
+    recent.sort(key=lambda item: item[0], reverse=True)
+    return [key for _, key in recent] + keys if recent else keys
 
 if __name__ == '__main__':
     main()

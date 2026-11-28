@@ -150,7 +150,7 @@ with tempfile.TemporaryDirectory() as tmp:
     real_watch_pass = gfx2hlsl.watch_pass
     real_sleep = time.sleep
     try:
-        def mock_watch_pass_single(out_dir, skip_failed, jobs=None, completed=None):
+        def mock_watch_pass_single(out_dir, skip_failed, jobs=None, completed=None, watch_since_ns=None):
             observed_watch.append(('pass', jobs))
             raise KeyboardInterrupt
 
@@ -171,7 +171,7 @@ with tempfile.TemporaryDirectory() as tmp:
 
             # --watch <dir> 3.5 --jobs 4: interval is 3.5, jobs is 4
             pass_count = [0]
-            def mock_watch_pass_multi(out_dir, skip_failed, jobs=None, completed=None):
+            def mock_watch_pass_multi(out_dir, skip_failed, jobs=None, completed=None, watch_since_ns=None):
                 pass_count[0] += 1
                 observed_watch.append(('pass', jobs))
                 if pass_count[0] >= 2:
@@ -391,11 +391,11 @@ with tempfile.TemporaryDirectory() as tmp:
 from concurrent.futures.process import BrokenProcessPool  # noqa: E402
 
 
-def broken(out_dir, skip_failed=False, jobs=None, completed=None):
+def broken(out_dir, skip_failed=False, jobs=None, completed=None, watch_since_ns=None):
     raise BrokenProcessPool('a worker was terminated abruptly')
 
 
-def broken_type_error(out_dir, skip_failed=False, jobs=None, completed=None):
+def broken_type_error(out_dir, skip_failed=False, jobs=None, completed=None, watch_since_ns=None):
     raise TypeError('unexpected internal error')
 
 

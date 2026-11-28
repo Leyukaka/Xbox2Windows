@@ -957,11 +957,14 @@ report no unprotected window, three times. Its control without holding the other
 
 With `-Render -Translate`, `run.ps1` starts `tools/startup/gfx2hlsl.py --watch <shader cache>` beside
 the debugger and stops it, with its worker processes, when the debugger returns (`-Translate`
-without `-Render` is ignored with a warning). The watcher repeats the `--pending` scan every
-2 seconds (`--watch <dir> <seconds>` sets another interval), so a pipeline the title creates during
-the run is translated within seconds, and the runtime picks it up on a later draw instead of on the
-next run. The runtime looks for an absent manifest again 1 second after the first miss and doubles
-the wait with each further miss up to 32 seconds. A translation published during the run is therefore
+without `-Render` is ignored with a warning). The watcher waits 2 seconds between passes
+(`--watch <dir> <seconds>` sets another interval). In each pass, it takes ready markers written since
+the watcher started in newest-first order ahead of the older backlog. It processes batches of up to
+four keys per configured worker and rescans between batches at most once per second, so a pipeline
+created during the run is translated within seconds and the runtime picks it up on a later draw
+instead of on the next run. The runtime
+looks for an absent manifest again 1 second after the first miss and doubles the wait with each
+further miss up to 32 seconds. A translation published during the run is therefore
 used on a draw or Dispatch at most 32 seconds later, and a key that never gets a translation costs one
 cache lookup every 32 seconds instead of one per second (each lookup holds `draw_lock`, which every draw
 and Dispatch takes). The cache persists: a later run reads every published `<key>.txt` and translates only new
