@@ -42,6 +42,7 @@ struct DirectCompute {
     unsigned exchange_words = 0;
     bool uses_exchange = false;
     bool wave64 = false;
+    bool narrow_wave64 = false;
     // The view class a GPU-selected heap slot is read as; see HeapViewContract.
     HeapViewContract heap_view = HeapViewContract::none;
     // heap_view is raw_buffer and the path is direct: the byte-address rewrite of a heap descriptor is tracked.
@@ -213,8 +214,13 @@ struct DirectCompute {
             auto pair = exchange_halves(mask);
             write(dst, pair[0]);
             write(dst + 1, pair[1]);
-        } else
+        } else {
             write(dst, mask);
+            // V_CMPX replaces EXEC. A narrow guest wave64 has no upper
+            // lanes, even if a preceding scalar write set bits in EXEC_HI.
+            if (narrow_wave64 && dst == 126)
+                write(127, "0");
+        }
     }
     string pair_high(const Inst &i, unsigned src) {
         if (src <= 104 || src == 106 || src == 126) {
@@ -3555,7 +3561,9 @@ struct DirectCompute {
         };
         if ((i.enc == Encoding::Sop1 || i.enc == Encoding::Sop2) && n.size() > 6 && n.substr(n.size() - 4) == "_b64") {
             bool save = n.find("_saveexec_") != Name::npos;
-            const bool wrexec = compute && wave64 && (n == "s_andn2_wrexec_b64" || n == "s_andn1_wrexec_b64");
+            const bool wrexec = compute &&
+                (((wave64 || narrow_wave64) && n == "s_andn2_wrexec_b64") ||
+                 (wave64 && n == "s_andn1_wrexec_b64"));
             auto op = n.substr(2, n.find('_', 2) - 2);
             if (wrexec ? ((i.dst | i.src[0]) & 1) || i.dst > 104 || i.src[0] > 104
                        : (i.dst & 1) || (i.dst > 104 && i.dst != 106 && i.dst != 126) ||
@@ -3564,6 +3572,8 @@ struct DirectCompute {
             auto ah = pair_high(i, i.src[0]);
             const bool updates_exec = save || wrexec;
             auto bl = updates_exec ? read(126) : b;
+            // The narrow model starts EXEC_HI at zero. Scalar code can
+            // explicitly write it, and later scalar instructions can read it.
             auto bh = updates_exec ? read(127) : pair_high(i, i.src[1]);
             // SAVEEXEC and WREXEC combine the source with old EXEC in ISA operand order.
             // WREXEC stores the new mask in the destination pair.

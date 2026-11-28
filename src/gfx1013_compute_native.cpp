@@ -630,7 +630,8 @@ static std::optional<Symbol> byte_descriptor_field(const Inst &i, const State &s
         return field(a,T::byte_oob);
     return {};
 }
-State transfer(const Inst &i, State s, bool wave64, bool graphics, bool heap_window, bool direct) {
+State transfer(const Inst &i, State s, bool wave64, bool graphics, bool heap_window, bool direct,
+               bool narrow_wave64) {
     auto set = [&](unsigned n, Symbol v) {
         if (n >= s.size())
             refuse(i.pc, "invalid SGPR");
@@ -759,7 +760,8 @@ State transfer(const Inst &i, State s, bool wave64, bool graphics, bool heap_win
                i.name == "v_readfirstlane_b32" || i.name == "v_readlane_b32")
     {
         set(i.dst, {});
-        if ((wave64 && i.enc == Encoding::Vopc) || ((i.enc == Encoding::Sop1 || i.enc == Encoding::Sop2) &&
+        if (((wave64 || (narrow_wave64 && i.dst == 126)) && i.enc == Encoding::Vopc) ||
+            ((i.enc == Encoding::Sop1 || i.enc == Encoding::Sop2) &&
             i.name.size() >= 4 &&
             (i.name.substr(i.name.size() - 4) == "_b64" || i.name.substr(i.name.size() - 4) == "_i64" ||
              i.name.substr(i.name.size() - 4) == "_u64") &&
@@ -839,7 +841,7 @@ std::map<unsigned, Inst> fixed_vertex_loads(const string &code) {
     return found ? result : std::map<unsigned, Inst>{};
 }
 Program parse(const string &code, unsigned entry, const State &initial, bool graph, bool graphics=false, bool wave64=false, bool fixed_vertex=false,
-              bool heap_window=false) {
+              bool heap_window=false, bool narrow_wave64=false) {
     Program p;
     p.graphics_wave64 = graphics && wave64;
     if ((entry & 3) || entry >= code.size() || code.size() > 1u << 20)
@@ -888,7 +890,7 @@ Program parse(const string &code, unsigned entry, const State &initial, bool gra
         auto k = work.front();
         work.pop_front();
         auto &i = p.code[k];
-        auto after = transfer(i, p.before[k], wave64, graphics, heap_window, graph);
+        auto after = transfer(i, p.before[k], wave64, graphics, heap_window, graph, narrow_wave64);
         auto merge = [&](size_t t) {
             bool changed = !p.reached[t];
             auto &in = p.before[t];
@@ -1774,9 +1776,10 @@ static NativeComputeShader translate_program(const ComputeRequest &request, unsi
     // has lanes 0..31 only, so EXEC's high word is zero and v_mbcnt_hi adds nothing for its lanes. The model
     // does not write the zero high word that a wave64 compare or carry-out stores in an SGPR pair destination.
     const bool wave64 = stage ? !stage->wave32 : direct_dxil && !request.wave32 && threads > 32;
+    const bool narrow_wave64 = !stage && direct_dxil && !request.wave32 && !wave64;
     // The byte-address rewrite of a GPU-selected heap descriptor is read only under the raw_buffer contract.
     const bool heap_window = direct_dxil && heap_view == HeapViewContract::raw_buffer;
-    auto program = parse(request.code, entry, initial, direct_dxil, false, wave64, false, heap_window);
+    auto program = parse(request.code, entry, initial, direct_dxil, false, wave64, false, heap_window, narrow_wave64);
     Emit emit{{}, program,layout->Desc_1_1};
     emit.result.constants = constants;
     if (!lds)
@@ -1786,6 +1789,7 @@ static NativeComputeShader translate_program(const ComputeRequest &request, unsi
     if (direct_dxil) {
         DirectCompute compiler{emit};
         compiler.wave64 = wave64;
+        compiler.narrow_wave64 = narrow_wave64;
         compiler.heap_view = heap_view;
         compiler.heap_window = heap_window;
         for (size_t i = 0; i < program.code.size(); ++i) {
