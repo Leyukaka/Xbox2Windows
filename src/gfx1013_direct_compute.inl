@@ -2878,25 +2878,29 @@ struct DirectCompute {
             return;
         }
         if (compute && (n == "s_cselect_b64" || n == "s_not_b64")) {
-            if ((i.dst & 1) || (i.dst > 104 && i.dst != 106))
+            const bool invert = n == "s_not_b64";
+            if ((i.dst & 1) || (i.dst > 104 && i.dst != 106 && !(invert && i.dst == 126)))
                 refuse(i.pc, "invalid " + string(n) + " destination");
-            auto high = [&](unsigned src) {
-                if (src == 106 || src == 126)
+            auto scalar64 = [&](unsigned src) -> std::pair<string, string> {
+                if (!((src <= 104 && !(src & 1)) || src == 106 || src == 126 ||
+                      (src >= 128 && src <= 208) || src == 255))
                     refuse(i.pc, "invalid " + string(n) + " source");
-                return pair_high(i, src);
+                return {operand32(i, src), pair_high(i, src)};
             };
-            auto lo = val(0), hi = high(i.src[0]);
-            if (n == "s_cselect_b64") {
+            auto [lo, hi] = scalar64(i.src[0]);
+            if (!invert) {
+                auto [other_lo, other_hi] = scalar64(i.src[1]);
                 auto condition = cmp("ne", read(128), "0");
-                lo = select(condition, lo, val(1));
-                hi = select(condition, hi, high(i.src[1]));
+                lo = select(condition, lo, other_lo);
+                hi = select(condition, hi, other_hi);
             } else {
                 lo = ir.binary("xor", lo, "4294967295");
                 hi = ir.binary("xor", hi, "4294967295");
-                write(128, ir.value("zext i1 " + cmp("ne", ir.binary("or", lo, hi), "0") + " to i32"));
             }
             write(i.dst, lo);
             write(i.dst + 1, hi);
+            if (invert)
+                write(128, ir.value("zext i1 " + cmp("ne", ir.binary("or", lo, hi), "0") + " to i32"));
             return;
         }
         if (compute && (n == "s_lshl_b64" || n == "s_lshr_b64" || n == "s_ashr_i64")) {
