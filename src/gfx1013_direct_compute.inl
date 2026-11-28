@@ -35,6 +35,8 @@ struct DirectCompute {
     std::map<std::pair<unsigned,unsigned>,string> descriptor_strides;
     unsigned label_number = 0;
     bool pixel_stage = false;
+    bool complete_compute_quads = false;
+    bool compute_derivatives = false;
     // Straight-line graphics stages keep exact SSA definitions; a missing
     // entry value is resolved through the container's stage signature.
     std::function<string(unsigned)> graphics_input;
@@ -201,6 +203,7 @@ struct DirectCompute {
     }
     void initialize(unsigned user, unsigned flags, unsigned x, unsigned y, unsigned z) {
         unsigned threads = x * y * z;
+        complete_compute_quads = threads % 4 == 0;
         lane = ir.invoke("i32", "waveGetLaneIndex", 111, {}, "nounwind readnone");
         lane_bit = ir.binary("shl", "1", lane);
         write(126, ballot("true"));
@@ -828,8 +831,11 @@ struct DirectCompute {
         const bool compare_gather = i.op == 79;
         const bool compare = i.op == 40 || i.op == 47 || compare_gather;
         const bool implicit = i.op == 32 || i.op == 40 || bias || query || i.op == 64;
-        if (implicit && !pixel_stage)
-            refuse(i.pc, "implicit derivatives require a pixel stage");
+        if (implicit && !pixel_stage) {
+            if (!complete_compute_quads)
+                refuse(i.pc, "implicit derivatives require a pixel stage");
+            compute_derivatives = true;
+        }
         const bool gather = i.op == 64 || i.op == 71 || compare_gather;
         const bool gather_lod = i.op == 68;
         const bool sample = (!gather && implicit) || (compare && !gather) || gradient || i.op == 39 || i.op == 36,
@@ -3883,7 +3889,13 @@ struct DirectCompute {
         const unsigned rank_words = x * y * z > 64 ? x * y * z : 0;
         if ((uses_lds ? lds_words : 0) + rank_words + (uses_exchange ? exchange_words : 0) > 8192)
             refuse(entry, "combined shared storage exceeds 32 KiB");
-        r.dxil_ir = ir.finish_compute(x, y, z);
+        // SM 6.6 forms consecutive linear quads for 1D groups. In 2D it forms
+        // spatial 2x2 quads, which can cross the guest's consecutive lane quads.
+        // initialize() still reconstructs guest IDs using the original dimensions.
+        // The wave64 split occurs at lane 32, a quad boundary.
+        if (compute_derivatives)
+            ir.validator_minor = 8;
+        r.dxil_ir = compute_derivatives ? ir.finish_compute(x * y * z, 1, 1) : ir.finish_compute(x, y, z);
         return std::move(r);
     }
 };
